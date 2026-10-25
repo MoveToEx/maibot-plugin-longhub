@@ -1,0 +1,1 @@
+"""LONG Hub AstrBot plugin."""

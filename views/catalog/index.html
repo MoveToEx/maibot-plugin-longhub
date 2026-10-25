@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>LONG Hub 表情目录</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-icon">L</span><div><strong>LONG Hub</strong><small>表情目录 · AstrBot</small></div></div>
+      <nav aria-label="管理导航">
+        <button data-tab="overview" class="nav active"><span>◈</span>运行概览</button>
+        <button data-tab="catalog" class="nav"><span>▦</span>表情目录</button>
+        <button data-tab="logs" class="nav"><span>≡</span>Webhook 日志</button>
+        <button data-tab="tasks" class="nav"><span>↗</span>标注任务</button>
+        <button data-tab="settings" class="nav"><span>⚙</span>连接与设置</button>
+      </nav>
+      <div class="sidebar-footer"><span class="dot" id="connection-dot"></span><span id="connection-state">正在连接</span><small>图片来自远程 R2，目录保存在本地</small></div>
+    </aside>
+    <main>
+      <header class="topbar"><div><p class="eyebrow">LONG HUB / CATALOG</p><h1 id="page-title">运行概览</h1></div><button id="refresh" class="button secondary">↻ 刷新</button></header>
+      <div id="notice" class="notice" role="status" hidden></div>
+
+      <section id="overview" class="tab-panel">
+        <div class="hero"><div><span class="badge">远程图片，本地索引</span><h2>让表情，恰好出现在对话里。</h2><p>保持与 LONG Hub 同步，为模型准备有用的候选。<br>你可以随时补充标签、修正描述，或查看每一次更新。</p></div><div class="hero-mark" aria-hidden="true">: )<span>LONG / IN SYNC</span></div></div>
+        <div class="metrics" id="metrics"></div>
+        <div class="two-columns">
+          <article class="panel"><div class="panel-heading"><h3>目录同步</h3><span id="sync-badge" class="badge">等待配置</span></div><div id="sync-details" class="details"></div><div class="actions"><button class="button primary" data-action="sync">立即全量校准</button><a href="https://docs.longhub.top/catalog-sync.html" target="_blank" rel="noreferrer">同步协议 ↗</a></div></article>
+          <article class="panel"><div class="panel-heading"><h3>Webhook 接收器</h3><span id="receiver-badge" class="badge">—</span></div><div id="receiver-details" class="details"></div><button class="button secondary" data-open-tab="settings">配置连接 →</button></article>
+        </div>
+        <article class="panel setup-panel"><div class="panel-heading"><h3>首次连接，按这个顺序</h3><span class="muted">只同步元数据</span></div><ol class="steps"><li><b>01</b><div><strong>配置连接</strong><p>填写 Appkey 与 webhook 签名密钥，保存并启动接收器。</p></div></li><li><b>02</b><div><strong>在 Hub 启用订阅</strong><p>填入公网 HTTPS 回调地址，订阅全部事件，使用下方模板。</p></div></li><li><b>03</b><div><strong>开始首次同步</strong><p>确认订阅已启用后保存，目录会自动下载并校验。</p></div></li></ol></article>
+      </section>
+
+      <section id="catalog" class="tab-panel" hidden>
+        <div class="toolbar"><form id="search-form" class="search"><input id="query" aria-label="搜索目录" placeholder="搜索文字、情绪、场景或标签…"><button class="button primary">搜索</button></form><select id="rating-filter" aria-label="分级筛选"><option value="">全部分级</option><option>none</option><option>moderate</option><option>violent</option></select><select id="annotation-filter" aria-label="标注筛选"><option value="">全部标注状态</option><option value="missing">缺少有效标注</option></select><select id="enabled-filter" aria-label="启用状态筛选"><option value="">全部启用状态</option><option value="true">已启用</option><option value="false">已禁用</option></select></div>
+        <div class="list-heading"><span id="catalog-count" class="muted">正在读取目录</span><button id="tag-selected" class="button secondary">标注选中项 <span id="selected-count">0</span></button></div>
+        <div id="gallery" class="gallery"></div><div id="catalog-pagination" class="pagination"></div>
+      </section>
+
+      <section id="logs" class="tab-panel" hidden>
+        <div class="toolbar"><select id="event-filter" aria-label="事件筛选"><option value="">全部事件</option><option>create</option><option>update</option><option>delete</option><option>restore</option></select><label class="check"><input type="checkbox" id="failed-filter">只看失败</label><button id="retry-webhooks" class="button secondary">重试待处理通知</button></div>
+        <article class="panel table-panel"><div class="table-scroll"><table><thead><tr><th>接收时间</th><th>事件 / 图片</th><th>验签</th><th>HTTP</th><th>处理状态</th><th></th></tr></thead><tbody id="log-rows"></tbody></table></div><div id="logs-empty" class="empty" hidden>还没有 webhook 调用记录。</div></article><div id="log-pagination" class="pagination"></div>
+        <p class="muted small">每次调用单独记录；相同图片的待处理通知可以合并刷新。失败通知会退避重试。</p>
+      </section>
+
+      <section id="tasks" class="tab-panel" hidden>
+        <article class="panel"><div class="panel-heading"><div><h3>视觉标签补全</h3><p class="muted">复用 AstrBot 中的视觉模型，后台处理，不等待聊天请求。</p></div><span id="tag-state" class="badge">—</span></div><div id="task-metrics" class="metrics compact"></div><div class="actions wrap"><button id="tag-missing" class="button primary">为全部未标注图片排队</button><button id="pause-tagging" class="button secondary">暂停队列</button></div><p class="muted small">此操作会调用你配置的模型。已有人工标签和描述会保留。失败三次的条目可在目录详情中手动重试；暂停后在途请求仍会完成。</p></article>
+        <article class="panel"><h3>标签如何协作</h3><div class="source-legend"><span class="chip source-hub">Hub 标签</span><span>＋</span><span class="chip source-ai">视觉模型标签</span><span>＋</span><span class="chip source-manual">人工标签</span><span>− 本地屏蔽标签</span></div><p class="muted">上游的文字与分级保持原样。人工描述优先于模型描述；全量同步和 webhook 更新都不会覆盖你的人工修订。</p></article>
+      </section>
+
+      <section id="settings" class="tab-panel" hidden>
+        <form id="settings-form">
+          <article class="panel"><div class="panel-heading"><h3>LONG Hub 连接</h3><a href="https://docs.longhub.top/api/" target="_blank" rel="noreferrer">API 文档 ↗</a></div><div class="form-grid"><label>API 基础地址<input name="api_base" type="url" required></label><label>Appkey<input name="app_key" type="password" autocomplete="new-password" placeholder="留空保留已有值"><small id="app-key-state"></small></label><label>Webhook 签名密钥<input name="webhook_secret" type="password" autocomplete="new-password" placeholder="留空保留已有值"><small id="secret-state"></small></label></div></article>
+          <article class="panel"><h3>Webhook 与校准</h3><div class="form-grid"><label>监听地址<input name="webhook_host" required><small>本机反代用 127.0.0.1；容器映射端口用 0.0.0.0。</small></label><label>监听端口<input name="webhook_port" type="number" min="1" max="65535" required></label><label>全量校准间隔（小时）<input name="sync_interval_hours" type="number" min="1" max="720" required></label><label>图片域名白名单<input name="image_hosts" placeholder="r2.longhub.top"><small>多个域名以英文逗号分隔，仅接受 HTTPS。</small></label></div><div class="template"><div><strong>Hub webhook 请求体模板</strong><button type="button" id="copy-template" class="button text-button">复制</button></div><code id="webhook-template">{"event":{{json .Event}},"imageId":{{json .Data.ImageID}}}</code><p>公网回调路径：<code>/hooks/longhub</code> · 订阅位掩码：<code>7</code> · 签名密钥需与本页一致。</p></div><label class="check"><input name="webhook_ready" type="checkbox">我已在 LONG Hub 启用订阅（保存后自动进行全量同步）</label></article>
+          <article class="panel"><h3>模型与聊天</h3><div class="form-grid"><label>视觉标注提供商<select name="vision_provider_id"><option value="">暂不启用视觉标注</option></select><small>选择原生支持图片的模型，首版以 OpenAI 兼容接口验收。</small></label><label>每分钟最多标注调用<input name="tagging_rpm" type="number" min="1" max="600" required></label><label>标注并发<input name="tagging_concurrency" type="number" min="1" max="8" required></label><label>自动候选数<input name="candidate_limit" type="number" min="1" max="10" required></label><label>单图最大大小（MiB）<input name="max_image_mb" type="number" min="1" max="100" required></label></div><label class="check"><input name="auto_tagging" type="checkbox">缺少标注的聊天候选自动进入后台队列</label><fieldset><legend>允许聊天使用的分级</legend><div class="actions"><label class="check"><input type="checkbox" name="rating_none">none</label><label class="check"><input type="checkbox" name="rating_moderate">moderate</label><label class="check"><input type="checkbox" name="rating_violent">violent</label></div></fieldset></article>
+          <article class="panel"><h3>日志保留</h3><div class="form-grid"><label>保留天数<input name="webhook_log_days" type="number" min="1" max="365" required></label><label>最多条数<input name="webhook_log_limit" type="number" min="100" max="100000" required></label></div></article>
+          <div class="save-bar"><span class="muted small">保存会重新启动插件后台服务，并保留本地目录与任务。</span><button class="button primary" type="submit">保存并应用</button></div>
+        </form>
+      </section>
+    </main>
+  </div>
+  <dialog id="meme-dialog"><div class="dialog-heading"><h3 id="meme-title">表情详情</h3><button class="close-button" data-close="meme-dialog" aria-label="关闭">×</button></div><div class="meme-detail"><div class="preview-area"><img id="detail-image" alt="表情预览"><p id="detail-caption"></p><span id="detail-rating" class="badge"></span></div><form id="edit-form"><p class="eyebrow">标签来源</p><div id="detail-sources"></div><label>人工标签（逗号或换行分隔）<textarea id="manual-tags" rows="2"></textarea></label><label>屏蔽的标签<textarea id="excluded-tags" rows="2"></textarea><small>从各来源的合并结果中移除，后续同步也会保留。</small></label><label>人工描述<textarea id="manual-description" rows="3" maxlength="1000"></textarea></label><label class="check"><input type="checkbox" id="use-ai-description">使用模型描述</label><label class="check"><input type="checkbox" id="meme-enabled">允许模型使用这张表情</label><div id="detail-job" class="muted small"></div><div class="actions wrap"><button class="button primary">保存修订</button><button type="button" id="tag-one" class="button secondary">重新标注</button></div></form></div></dialog>
+  <dialog id="log-dialog"><div class="dialog-heading"><h3>调用详情</h3><button class="close-button" data-close="log-dialog" aria-label="关闭">×</button></div><pre id="log-detail"></pre></dialog>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
