@@ -30,7 +30,7 @@ BARE_MENTION_TEXT = "（用户仅 @ 了机器人，没有附带文字。）"
 SEMANTIC_TOOL = "search_longhub_memes_semantic"
 
 
-@register(PLUGIN_NAME, "MoveToEx", "LONG Hub 同步表情目录", "0.3.0")
+@register(PLUGIN_NAME, "MoveToEx", "LONG Hub 同步表情目录", "0.3.1")
 class LongHubPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -124,6 +124,11 @@ class LongHubPlugin(Star):
         ):
             raise ValueError("所选 Embedding 提供商不存在或不是嵌入模型，请检查 AstrBot 提供商配置")
         return provider
+
+    @staticmethod
+    def _log_tool_call(name, **arguments):
+        payload = json.dumps(arguments, ensure_ascii=False, default=str)
+        logger.info(f"LONG Hub tool call: {name} arguments={payload}")
 
     @staticmethod
     def _limit_semantic_tool(req, available):
@@ -609,6 +614,7 @@ class LongHubPlugin(Star):
             query(string): 回退检索时使用的图片文字、描述、情绪或交流意图，可用中文或其他原语言。
             limit(number): 最多返回的候选数，默认为 5，范围 1 到 10。
         """
+        self._log_tool_call("search_longhub_memes", query=query, limit=limit)
         if not self.service:
             return "LONG Hub 尚未初始化。"
         try:
@@ -637,6 +643,7 @@ class LongHubPlugin(Star):
             concept(string): 想表达的情绪、画面或对话场景，1–1000 字自然语言，例如“尴尬又想装作无事发生”。
             limit(number): 最多返回的候选数，默认 5，范围 1 到 10。
         """
+        self._log_tool_call(SEMANTIC_TOOL, concept=concept, limit=limit)
         semantic = getattr(self.service, "semantic", None)
         if semantic is None:
             return "语义检索尚未初始化，可暂用标签或文字搜索。"
@@ -690,6 +697,7 @@ class LongHubPlugin(Star):
             sql(string): 单条只读 SELECT 或 WITH … SELECT；优先用中英文多个标签 IN/OR 并行匹配，最长 8192 字节。
             limit(number): 最多返回行数，默认 10，范围 1 到 50；另有 32 KiB 结果大小和执行限额。
         """
+        self._log_tool_call("query_longhub_memes_sql", sql=sql, limit=limit)
         if not self.service:
             return "LONG Hub 尚未初始化。"
         try:
@@ -710,6 +718,7 @@ class LongHubPlugin(Star):
             image_id(string): 搜索结果中 id 字段的十进制字符串，不是 URL。
             position(string): 需要配文时选 before（文字前）或 after（文字后）；两者都允许只发图并以内部标记结束。省略时为 before。
         """
+        self._log_tool_call("send_longhub_meme", image_id=image_id, position=position)
         if not self.service:
             return "LONG Hub 尚未初始化。"
         service = self.service
