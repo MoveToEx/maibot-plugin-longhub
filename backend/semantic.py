@@ -94,6 +94,7 @@ class SemanticIndex:
         self.entries = {}
         self.desired = {}
         self.total = 0
+        self.catalog_total = self.catalog_annotated = 0
         self.revision = None
         self.catalog_lock = asyncio.Lock()
         self.index_lock = asyncio.Lock()
@@ -107,9 +108,19 @@ class SemanticIndex:
             if self.revision == self.db.catalog_revision:
                 return
             revision = self.db.catalog_revision
-            rows = await self.db.semantic_catalog(self.settings.allowed_ratings)
-            self.total = len(rows)
-            self.desired = {doc["id"]: doc for row in rows if (doc := document(row)) is not None}
+            rows = await self.db.semantic_catalog(include_disabled=True)
+            self.catalog_total = len(rows)
+            self.catalog_annotated = 0
+            self.total = 0
+            self.desired = {}
+            for row in rows:
+                doc = document(row)
+                if doc is not None:
+                    self.catalog_annotated += 1
+                if row["enabled"] and row["rating"] in self.settings.allowed_ratings:
+                    self.total += 1
+                    if doc is not None:
+                        self.desired[doc["id"]] = doc
             self.revision = revision
 
     def _provider(self):
@@ -175,6 +186,12 @@ class SemanticIndex:
             "coverage": len(self.desired) / self.total if self.total else 0,
             "indexed": matched,
             "pending": len(self.desired) - matched,
+            "catalog": {
+                "total": self.catalog_total,
+                "unannotated": self.catalog_total - self.catalog_annotated,
+                "annotated_unindexed": self.catalog_annotated - matched,
+                "indexed": matched,
+            },
             "available": available,
             "state": state,
             "error": error,

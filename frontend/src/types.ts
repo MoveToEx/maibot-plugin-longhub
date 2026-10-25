@@ -42,6 +42,12 @@ export interface SemanticStatus {
   coverage: number;
   indexed: number;
   pending: number;
+  catalog: {
+    total: number;
+    unannotated: number;
+    annotated_unindexed: number;
+    indexed: number;
+  };
   available: boolean;
   state: string;
   error: string | null;

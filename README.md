@@ -14,6 +14,8 @@
 
 管理面板为 React + Vite + React Router + Tailwind CSS SPA，使用 [Base UI](https://base-ui.com/react/overview/quick-start) 提供弹窗、选择器、开关、复选框和按钮。采用顶部导航，手机端可横向滚动，跟随 AstrBot 的亮色／暗色主题；目录筛选、分页和表情详情使用 Hash 路由，支持刷新与前进、后退。安装包已包含构建产物，部署时无需 Node.js 或前端构建步骤。
 
+概览采用淡灰色背景，第一行展示目录同步与本地表情总数，第二行展示 Chart.js 标注进度饼图与 Webhook 接收器。饼图按全库当前条目分为「待标注」「已标注未向量化」「已向量化」；待标注包含已过期的 AI 标注，不等于已排队任务数。禁用、分级不允许或尚未完成索引的有效标注属于未向量化。语义查询可用时，图表右上角显示带提示的状态图标。
+
 ## 安装与首次配置
 
 1. 将本项目放入 AstrBot 的 `data/plugins/astrbot_plugin_longhub/`，或在插件管理中上传打包后的 ZIP。运行环境安装 `requirements.txt` 中的依赖，重载插件。

@@ -25,26 +25,22 @@ const navigation = [
     path: 'overview',
     title: '运行概览',
     icon: LayoutDashboard,
-    subtitle: '目录、同步与后台任务，一目了然。',
   },
   {
     path: 'catalog',
     title: '表情目录',
     icon: Images,
-    subtitle: '找到合适的表情，也让模型更懂它。',
   },
-  { path: 'tasks', title: '标注任务', icon: Sparkles, subtitle: '用视觉模型补充描述与标签。' },
+  { path: 'tasks', title: '标注任务', icon: Sparkles },
   {
     path: 'logs',
     title: 'Webhook 日志',
     icon: Webhook,
-    subtitle: '每一次通知与处理结果，都有迹可循。',
   },
   {
     path: 'settings',
     title: '连接与设置',
     icon: Settings2,
-    subtitle: '管理 LONG Hub 连接与模型偏好。',
   },
 ];
 
@@ -118,7 +114,6 @@ function Shell() {
           <div>
             <p className="eyebrow">LONG HUB CONSOLE</p>
             <h1>{page.title}</h1>
-            <p className="text-sm text-muted mt-2 leading-6">{page.subtitle}</p>
           </div>
           <Button id="refresh" onClick={refresh}>
             <RefreshCw size={14} />
@@ -136,13 +131,6 @@ function Shell() {
           <Route path="/settings" element={<Settings />} />
           <Route path="*" element={<Navigate to="/overview" replace />} />
         </Routes>
-        <footer className="page-footer">
-          <span>LONG Hub 表情目录</span>
-          <span className="flex items-center gap-1.5">
-            <CheckCircle2 size={12} />
-            人工修订独立保留
-          </span>
-        </footer>
       </main>
       {notice && (
         <div

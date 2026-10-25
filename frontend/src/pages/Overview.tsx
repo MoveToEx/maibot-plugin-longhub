@@ -11,16 +11,22 @@ import {
   Play,
   RefreshCw,
   Sparkles,
-  Tags,
   Webhook,
 } from 'lucide-react';
 import { Link } from 'react-router';
+import { lazy, Suspense } from 'react';
 import { api, formatDate, jobLabels } from '../api';
 import { Badge, Button, Loading, Panel, PanelHeading } from '../components/ui';
 import { useApp } from '../context';
 import { useAction } from '../hooks';
 import type { Status } from '../types';
 import type { LucideIcon } from 'lucide-react';
+
+const AnnotationChart = lazy(() =>
+  import('../components/AnnotationChart').then(({ AnnotationChart }) => ({
+    default: AnnotationChart,
+  })),
+);
 
 function Metric({
   label,
@@ -77,41 +83,12 @@ export function Overview() {
   if (!s) return <Loading />;
   const syncBusy = ['queued', 'running'].includes(s.sync.status);
   const syncError = s.sync.error || s.sync_error;
-  const jobs = s.tag_jobs;
   return (
     <div className="page-stack">
-      <div className="overview-intro">
-        <div className="flex items-center gap-2 text-xs text-accent font-medium">
-          <span className={`status-dot ${s.ready && s.receiver.started ? 'online' : ''}`} />
-          {s.ready && s.receiver.started ? '已准备好，与对话保持同频' : '从连接 LONG Hub 开始'}
-        </div>
-        <p className="mt-2 text-xs text-muted">表情来自远方，合适的回应就在这里。</p>
-        <Link className="text-link" to="/catalog">
-          浏览目录
-          <ArrowRight size={14} />
-        </Link>
-      </div>
-      <div className="metrics-grid" id="metrics">
-        <Metric label="本地表情" value={s.total} note="仅保存元数据" icon={Images} />
-        <Metric
-          label="待处理通知"
-          value={s.pending_notifications}
-          note="Webhook 更新队列"
-          icon={Webhook}
-        />
-        <Metric
-          label="待标注图片"
-          value={(jobs.queued || 0) + (jobs.running || 0)}
-          note="按需与手工排队"
-          icon={Sparkles}
-        />
-        <Metric label="已完成标注" value={jobs.done || 0} note="描述与标签已就绪" icon={Tags} />
-      </div>
-      <div className="grid xl:grid-cols-2 gap-5">
-        <Panel>
+      <div className="overview-primary-row">
+        <Panel id="sync-panel" className="flex flex-col">
           <PanelHeading
             title="目录同步"
-            description="与 LONG Hub 保持一致的本地索引"
             action={
               <Badge
                 tone={
@@ -154,7 +131,7 @@ export function Overview() {
               {syncError}
             </p>
           )}
-          <div className="panel-footer">
+          <div className="sync-actions">
             <Button
               variant="primary"
               disabled={pending || syncBusy || !s.ready || !s.receiver.started}
@@ -169,21 +146,29 @@ export function Overview() {
               <RefreshCw size={14} />
               {syncBusy ? '校准进行中' : '立即全量校准'}
             </Button>
-            <a
-              className="text-link"
-              href="https://docs.longhub.top/catalog-sync.html"
-              target="_blank"
-              rel="noreferrer"
-            >
-              同步协议
-              <ArrowUpRight size={13} />
-            </a>
           </div>
         </Panel>
-        <Panel>
+        <Panel id="catalog-total" className="catalog-total">
+          <PanelHeading
+            title="本地表情总数"
+            action={<Images size={17} strokeWidth={1.6} className="text-muted" />}
+          />
+          <p className="catalog-total-number">{s.total.toLocaleString()}</p>
+        </Panel>
+      </div>
+      <div className="overview-secondary-row">
+        <Suspense
+          fallback={
+            <Panel>
+              <Loading label="正在加载标注进度" />
+            </Panel>
+          }
+        >
+          <AnnotationChart status={s} />
+        </Suspense>
+        <Panel id="webhook-panel" className="flex flex-col">
           <PanelHeading
             title="Webhook 接收器"
-            description="接收更新通知，自动维护目录"
             action={
               <Badge tone={s.receiver.started ? 'success' : 'danger'}>
                 {s.receiver.started ? '正在监听' : '未启动'}
@@ -202,7 +187,7 @@ export function Overview() {
             <Detail label="最近有效调用">{formatDate(s.last_webhook)}</Detail>
             <Detail label="运行状态">{s.receiver.error || s.background_error || '正常'}</Detail>
           </dl>
-          <div className="panel-footer">
+          <div className="webhook-actions">
             <Link className="button button-secondary" to="/logs">
               查看调用日志
               <ArrowRight size={14} />
@@ -211,61 +196,6 @@ export function Overview() {
               连接设置
               <ArrowUpRight size={13} />
             </Link>
-          </div>
-        </Panel>
-      </div>
-      <div className="grid lg:grid-cols-[1.5fr_1fr] gap-5">
-        <Panel>
-          <PanelHeading
-            title={s.ready ? '一个表情，三份理解' : '首次连接，三步就绪'}
-            description={
-              s.ready
-                ? '不同来源的标签共同帮助模型找到合适的回应。'
-                : '完成配置后，目录会自动下载并校验。'
-            }
-          />
-          <div className="steps-grid">
-            {(s.ready
-              ? [
-                  ['LONG Hub', '同步作品、主体等上游标签。'],
-                  ['视觉模型', '补充中文情绪、场景与龙脸标注。'],
-                  ['人工修订', '补充标签，屏蔽误判，保留你的理解。'],
-                ]
-              : [
-                  ['配置连接', '填写 Appkey 与 webhook 签名密钥。'],
-                  ['启用订阅', '在 Hub 填写公网回调与请求体模板。'],
-                  ['开始同步', '确认订阅启用并保存，即可导入目录。'],
-                ]
-            ).map(([title, text], i) => (
-              <div key={title}>
-                <span className="step-number">0{i + 1}</span>
-                <h3 className="text-xs font-semibold mt-4">{title}</h3>
-                <p className="text-xs text-muted leading-6 mt-2">{text}</p>
-              </div>
-            ))}
-          </div>
-        </Panel>
-        <Panel>
-          <PanelHeading title="目录分布" action={<Badge>{s.total.toLocaleString()} 张</Badge>} />
-          <div className="space-y-5">
-            {(['none', 'moderate', 'violent'] as const).map((rating, i) => (
-              <div key={rating}>
-                <div className="flex justify-between text-xs mb-2">
-                  <span className="text-muted">{rating}</span>
-                  <span className="tabular-nums">
-                    {(s.ratings?.[rating] || 0).toLocaleString()}
-                  </span>
-                </div>
-                <div className="distribution-track">
-                  <span
-                    style={{
-                      width: `${s.total ? ((s.ratings?.[rating] || 0) / s.total) * 100 : 0}%`,
-                      opacity: 1 - i * 0.23,
-                    }}
-                  />
-                </div>
-              </div>
-            ))}
           </div>
         </Panel>
       </div>

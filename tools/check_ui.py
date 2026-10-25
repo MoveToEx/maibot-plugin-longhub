@@ -30,7 +30,8 @@ BRIDGE = r"""
   tag_jobs:{queued:12,running:1,done:48,failed:4},tagging_paused:false,ready:true,
   receiver:{started:true,error:null,listen:'127.0.0.1:8791',path:'/hooks/longhub'},
   sync:{status:'done'},last_sync:{completed_at:1792886400},last_webhook:1792886460,vision_configured:true,
-  semantic:{configured:true,provider_id:'embedding',model:'embedding-demo',total:65,annotated:49,coverage:49/65,indexed:49,pending:0,available:true,state:'ready',error:null}};
+  semantic:{configured:true,provider_id:'embedding',model:'embedding-demo',total:65,annotated:49,coverage:49/65,indexed:49,pending:0,available:true,state:'ready',error:null,catalog:{total:65,unannotated:16,annotated_unindexed:0,indexed:49}}};
+ window.__status=status;
  const logs=[
   {id:1,received:1792886460,image_id:'9223372036854775807',event:'update',signature_valid:true,
    http_status:204,processed:true,attempts:0,body:'{"event":"update"}'},
@@ -138,7 +139,62 @@ async def check():
                 await page.route("https://r2.longhub.top/**", media)
                 await page.goto(url)
                 await expect(page.locator("#connection-state")).to_have_text("已连接接收器")
+                await expect(page.locator(".page-heading h1 + p")).to_have_count(0)
+                await expect(page.locator(".page-footer")).to_have_count(0)
+                await expect(page.locator(".overview-intro, #metrics")).to_have_count(0)
+                await expect(page.get_by_role("link", name="同步协议", exact=True)).to_have_count(0)
+                await expect(
+                    page.get_by_role("heading", name="目录分布", exact=True)
+                ).to_have_count(0)
+                await expect(page.locator("#catalog-total")).to_contain_text("65")
+                await expect(page.locator("#annotation-chart canvas")).to_have_attribute(
+                    "aria-label", "图库标注进度：待标注 16 张，已标注未向量化 0 张，已向量化 49 张"
+                )
+                await expect(page.locator(".chart-legend li")).to_have_count(3)
+                sync_box = await page.locator("#sync-panel").bounding_box()
+                total_box = await page.locator("#catalog-total").bounding_box()
+                chart_box = await page.locator("#annotation-chart").bounding_box()
+                hook_box = await page.locator("#webhook-panel").bounding_box()
+                assert sync_box["y"] == total_box["y"] and sync_box["x"] < total_box["x"]
+                assert chart_box["y"] == hook_box["y"] and chart_box["x"] < hook_box["x"]
+                assert 2.9 < sync_box["width"] / total_box["width"] < 3.1
+                assert 1.9 < hook_box["width"] / chart_box["width"] < 2.1
+                await expect(page.locator(".webhook-actions")).to_have_css(
+                    "border-top-width", "0px"
+                )
+                assert (
+                    await page.evaluate(
+                        "getComputedStyle(document.documentElement).backgroundColor"
+                    )
+                    == "rgb(242, 243, 245)"
+                )
+                ready_icon = page.get_by_role("button", name="语义查询可用", exact=True)
+                await ready_icon.hover()
+                await expect(page.get_by_role("tooltip")).to_contain_text("模型会优先按概念检索")
+                await page.keyboard.press("Escape")
+                await page.locator("#refresh").focus()
                 await page.screenshot(path=str(output / "overview.png"), full_page=True)
+                # Observe real rendering across incremental updates, loss of readiness and empty catalogs.
+                await page.evaluate("""() => {
+                    window.__originalStatus=structuredClone(window.__status);
+                    Object.assign(window.__status.semantic, {available:false,indexed:43,pending:6,state:'indexing'});
+                    Object.assign(window.__status.semantic.catalog, {annotated_unindexed:6,indexed:43});
+                }""")
+                await page.locator("#refresh").click()
+                await expect(ready_icon).to_have_count(0)
+                await expect(page.locator("#annotation-chart canvas")).to_have_attribute(
+                    "aria-label", "图库标注进度：待标注 16 张，已标注未向量化 6 张，已向量化 43 张"
+                )
+                await page.screenshot(path=str(output / "overview-indexing.png"), full_page=True)
+                await page.evaluate("""() => {
+                    window.__status.total=0;
+                    Object.assign(window.__status.semantic.catalog,{total:0,unannotated:0,annotated_unindexed:0,indexed:0});
+                }""")
+                await page.locator("#refresh").click()
+                await expect(page.locator("#annotation-chart")).to_contain_text("暂无表情")
+                await page.evaluate("Object.assign(window.__status, window.__originalStatus)")
+                await page.locator("#refresh").click()
+                await expect(ready_icon).to_be_visible()
                 await page.locator('[data-tab="catalog"]').click()
                 await expect(page.locator(".meme-card")).to_have_count(30)
                 await page.get_by_role("button", name="下一页", exact=True).click()
@@ -250,6 +306,7 @@ async def check():
                 for tab in ["overview", "catalog", "logs", "tasks", "settings"]:
                     await page.locator(f'[data-tab="{tab}"]').click()
                     await expect(page.locator("h1")).to_be_visible()
+                    await expect(page.locator(".page-heading h1 + p")).to_have_count(0)
                     assert await page.evaluate(
                         "document.documentElement.scrollWidth <= innerWidth"
                     ), tab
@@ -271,9 +328,13 @@ async def check():
                 await expect(frame.get_by_role("dialog")).to_have_count(0)
                 await frame.locator('[data-tab="settings"]').click()
                 await expect(frame.locator("#settings-form")).to_be_visible()
+                await frame.locator('[data-tab="overview"]').click()
+                await expect(frame.locator("#annotation-chart canvas")).to_be_visible()
+                await frame.get_by_role("button", name="语义查询可用", exact=True).hover()
+                await expect(frame.get_by_role("tooltip")).to_contain_text("模型会优先按概念检索")
                 assert not errors, errors
                 print(
-                    "SPA checks passed: routes/history/reload, filters/pagination, edits/int64/XSS, selections, retry, logs/tasks/settings, dark/mobile, sandbox iframe"
+                    "SPA checks passed: overview layout/pie/tooltip/updates/empty, routes/history/reload, filters/pagination, edits/int64/XSS, selections, retry, logs/tasks/settings, dark/mobile, sandbox iframe"
                 )
                 print(output / "overview.png")
             finally:

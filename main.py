@@ -30,7 +30,7 @@ BARE_MENTION_TEXT = "（用户仅 @ 了机器人，没有附带文字。）"
 SEMANTIC_TOOL = "search_longhub_memes_semantic"
 
 
-@register(PLUGIN_NAME, "MoveToEx", "LONG Hub 同步表情目录", "0.3.1")
+@register(PLUGIN_NAME, "MoveToEx", "LONG Hub 同步表情目录", "0.3.2")
 class LongHubPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)

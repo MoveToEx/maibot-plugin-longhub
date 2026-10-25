@@ -1,5 +1,6 @@
 import copy
 import math
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -217,6 +218,44 @@ async def test_resume_without_reembedding_and_model_change_creates_new_cache(db,
     assert resumed.directory != directory and len(provider.batch_calls) == 2
     assert not directory.exists() and (resumed.root / "personal-notes").is_dir()
     await resumed.close()
+
+
+async def test_catalog_chart_counts_cover_all_current_images_and_only_current_vectors(
+    db, image, tmp_path
+):
+    engine, provider, _ = await setup(db, image, tmp_path)
+    await publish(db, [image(1), image(2), image(3), image(4, rating="violent")])
+    engine.settings = replace(engine.settings, allowed_ratings=["none"])
+    await db.update_override(1, {"enabled": False})
+    await db.update_override(4, {"description": "人工标注"})
+    assert (await engine.status())["catalog"] == {
+        "total": 4,
+        "unannotated": 0,
+        "annotated_unindexed": 4,
+        "indexed": 0,
+    }
+    await engine.run_once()
+    status = await engine.status()
+    assert status["available"] and status["total"] == 2
+    assert status["catalog"] == {
+        "total": 4,
+        "unannotated": 0,
+        "annotated_unindexed": 2,
+        "indexed": 2,
+    }
+    generation = await db.get_meta("active_generation")
+    await db.refresh(generation, 3, image(3, text="更新后旧标注已过期"))
+    await db.refresh(generation, 4, None)
+    assert (await engine.status())["catalog"] == {
+        "total": 3,
+        "unannotated": 1,
+        "annotated_unindexed": 1,
+        "indexed": 1,
+    }
+    provider.model = "new-vector-space"
+    assert (await engine.status())["catalog"]["indexed"] == 0
+    assert (await engine.status())["catalog"]["annotated_unindexed"] == 2
+    await engine.close()
 
 
 async def test_dirty_or_corrupt_native_cache_is_rebuilt(db, image, tmp_path):

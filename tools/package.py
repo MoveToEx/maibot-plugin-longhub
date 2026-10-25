@@ -24,7 +24,7 @@ def build():
     ]
     for directory, pattern in (("backend", "*.py"), ("views", "*"), (".astrbot-plugin", "*.json")):
         files.extend(p for p in (ROOT / directory).rglob(pattern) if p.is_file())
-    target = ROOT / "dist" / "astrbot_plugin_longhub-0.3.1.zip"
+    target = ROOT / "dist" / "astrbot_plugin_longhub-0.3.2.zip"
     target.parent.mkdir(exist_ok=True)
     with ZipFile(target, "w", compression=ZIP_DEFLATED) as archive:
         for source in sorted(files):

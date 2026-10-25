@@ -15,7 +15,7 @@
 
 :root {
   color-scheme: light;
-  --app-canvas: #f7f8fa;
+  --app-canvas: #f2f3f5;
   --app-surface: #ffffff;
   --app-soft: #f6f7f9;
   --app-ink: #22232d;
@@ -24,6 +24,9 @@
   --app-accent: #7560d8;
   --app-accent-soft: #f1edfc;
   --app-success: #3e9274;
+  --chart-pending: #c7cbd3;
+  --chart-annotated: #b6a8e5;
+  --chart-indexed: #7560d8;
   --danger: #c15361;
   --warning: #a57a3c;
   font-family: 'Inter', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
@@ -43,6 +46,9 @@ html[data-theme='dark'] {
   --app-accent: #b29bf5;
   --app-accent-soft: #2c263f;
   --app-success: #7bc8a8;
+  --chart-pending: #505462;
+  --chart-annotated: #7e6aa8;
+  --chart-indexed: #b29bf5;
   --danger: #e594a0;
   --warning: #d5b078;
 }
@@ -130,7 +136,7 @@ pre {
     @apply flex items-center gap-2 text-[10px] text-muted whitespace-nowrap;
   }
   .main-content {
-    @apply max-w-[1440px] mx-auto px-9 pt-8 pb-5 outline-none;
+    @apply max-w-[1440px] mx-auto px-9 pt-8 pb-9 outline-none;
   }
   .page-heading {
     @apply flex items-center justify-between gap-5 mb-7;
@@ -143,9 +149,6 @@ pre {
   }
   .page-stack {
     @apply flex flex-col gap-5;
-  }
-  .page-footer {
-    @apply flex flex-wrap items-center justify-between gap-3 text-[10px] text-muted pt-10 pb-3 mt-2;
   }
   .button {
     @apply inline-flex items-center justify-center gap-2 h-9 rounded-lg px-3.5 text-xs font-medium whitespace-nowrap border transition-colors disabled:opacity-45 disabled:pointer-events-none;
@@ -199,11 +202,51 @@ pre {
   .text-link {
     @apply inline-flex items-center gap-1.5 text-[11px] text-muted hover:text-accent;
   }
-  .overview-intro {
-    @apply relative rounded-xl border border-line px-5 py-4 bg-surface;
+  .overview-primary-row {
+    @apply grid lg:grid-cols-[minmax(0,3fr)_minmax(0,1fr)] gap-5;
   }
-  .overview-intro .text-link {
-    @apply absolute right-5 top-1/2 -translate-y-1/2;
+  .overview-secondary-row {
+    @apply grid lg:grid-cols-[minmax(0,1fr)_minmax(0,2fr)] gap-5;
+  }
+  .catalog-total {
+    @apply flex flex-col;
+  }
+  .catalog-total-number {
+    @apply flex flex-1 items-center justify-center py-8 text-[clamp(2rem,5vw,4rem)] font-semibold tracking-tight tabular-nums;
+  }
+  .sync-actions {
+    @apply mt-auto pt-5 flex justify-end;
+  }
+  .webhook-actions {
+    @apply mt-auto pt-5 flex justify-between items-center gap-3 flex-wrap;
+  }
+  .annotation-panel {
+    @apply flex flex-col;
+  }
+  .annotation-pie {
+    @apply relative w-full max-w-[180px] h-[180px] mx-auto;
+  }
+  .annotation-pie-empty {
+    @apply rounded-full bg-soft;
+  }
+  .chart-empty {
+    @apply absolute inset-0 flex items-center justify-center text-xs text-muted pointer-events-none;
+  }
+  .chart-legend {
+    @apply mt-5 space-y-2.5;
+  }
+  .chart-legend li {
+    @apply flex items-center gap-2 text-xs text-muted;
+  }
+  .chart-dot {
+    @apply size-2 rounded-full shrink-0;
+  }
+  .semantic-ready {
+    @apply inline-flex items-center justify-center size-7 rounded-lg text-success;
+    background: color-mix(in srgb, var(--app-success) 9%, var(--app-surface));
+  }
+  .tooltip-popup {
+    @apply max-w-64 border border-line bg-surface text-ink text-xs leading-6 rounded-lg px-3 py-2 shadow-lg;
   }
   .metrics-grid {
     @apply grid grid-cols-2 xl:grid-cols-4 gap-4;
@@ -256,12 +299,6 @@ pre {
   }
   .method {
     @apply text-[9px] font-semibold text-accent bg-accent-soft px-1.5 py-1 rounded;
-  }
-  .steps-grid {
-    @apply grid grid-cols-3 gap-5 mt-6;
-  }
-  .step-number {
-    @apply inline-flex items-center justify-center size-7 rounded-lg bg-soft text-muted text-[10px] font-medium;
   }
   .distribution-track {
     @apply h-1.5 bg-soft overflow-hidden rounded-full;
@@ -622,9 +659,6 @@ pre {
   .page-heading h1 {
     font-size: 23px;
   }
-  .page-heading > div > p:last-child {
-    font-size: 11px;
-  }
   .eyebrow {
     font-size: 8px;
   }
@@ -633,11 +667,6 @@ pre {
   }
   .table-panel {
     padding: 0;
-  }
-  .overview-intro .text-link {
-    position: static;
-    transform: none;
-    margin-top: 12px;
   }
   .metrics-grid {
     gap: 10px;
@@ -650,12 +679,6 @@ pre {
   }
   .metric > p:last-child {
     font-size: 9px;
-  }
-  .steps-grid {
-    gap: 15px;
-  }
-  .steps-grid p {
-    font-size: 10px;
   }
   .gallery {
     gap: 12px;

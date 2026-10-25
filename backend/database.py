@@ -430,23 +430,22 @@ class Database:
         )
         return result["items"]
 
-    async def semantic_catalog(self, ratings=RATINGS, ids=None):
+    async def semantic_catalog(self, ratings=RATINGS, ids=None, *, include_disabled=False):
         """One consistent bulk read; no per-image annotation/override queries."""
         if not ratings or ids == []:
             return []
         async with self.lock:
             generation = await self._meta("active_generation")
-            where = (
-                "i.generation=? AND COALESCE(o.enabled,1)=1 AND i.rating IN ("
-                + ",".join("?" for _ in ratings)
-                + ")"
-            )
+            where = "i.generation=? AND i.rating IN (" + ",".join("?" for _ in ratings) + ")"
             args = [generation, *ratings]
+            if not include_disabled:
+                where += " AND COALESCE(o.enabled,1)=1"
             if ids is not None:
                 where += " AND i.id IN (" + ",".join("?" for _ in ids) + ")"
                 args.extend(int(ident) for ident in ids)
             rows = await self._all(
                 f"""SELECT i.id,i.text,i.rating,i.image_key,i.hub_tags,
+                COALESCE(o.enabled,1) AS enabled,
                 COALESCE(o.manual_tags,'[]') AS manual_tags,
                 COALESCE(o.excluded_tags,'[]') AS excluded_tags,o.description AS manual_description,
                 a.image_key AS ai_image_key,a.source_text AS ai_source_text,
