@@ -65,10 +65,16 @@ class Database:
                 image_id INTEGER PRIMARY KEY, status TEXT NOT NULL,
                 attempts INTEGER NOT NULL DEFAULT 0, next_attempt REAL NOT NULL DEFAULT 0,
                 error TEXT, lease TEXT, updated REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS sent_memes(
+                id INTEGER PRIMARY KEY AUTOINCREMENT, receipt_id TEXT NOT NULL UNIQUE,
+                session TEXT NOT NULL, conversation TEXT NOT NULL, sent_at REAL NOT NULL,
+                image_id TEXT NOT NULL, details TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS sent_memes_scope
+                ON sent_memes(session,conversation,id DESC);
             CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
                 generation UNINDEXED, image_id UNINDEXED, text, manual_tags, tags, description,
                 tokenize='unicode61');
-            PRAGMA user_version=1;
+            PRAGMA user_version=2;
         """)
         await self.conn.execute(
             "UPDATE tag_jobs SET status='queued', lease=NULL WHERE status='running'"
@@ -118,6 +124,45 @@ class Database:
         async with self.lock:
             await self._set_meta(key, value)
             await self.conn.commit()
+
+    async def record_sent_meme(self, session, conversation, receipt_id, details):
+        async with self.lock, self._transaction():
+            await self.conn.execute(
+                "INSERT OR IGNORE INTO sent_memes(receipt_id,session,conversation,sent_at,image_id,details) VALUES(?,?,?,?,?,?)",
+                (
+                    receipt_id,
+                    session,
+                    conversation,
+                    time.time(),
+                    details["image_id"],
+                    dump(details),
+                ),
+            )
+            # Keep bounded metadata only: 20 receipts per conversation, 10,000 overall.
+            await self.conn.execute(
+                """DELETE FROM sent_memes WHERE session=? AND conversation=? AND id NOT IN
+                (SELECT id FROM sent_memes WHERE session=? AND conversation=? ORDER BY id DESC LIMIT 20)""",
+                (session, conversation, session, conversation),
+            )
+            await self.conn.execute(
+                "DELETE FROM sent_memes WHERE id NOT IN (SELECT id FROM sent_memes ORDER BY id DESC LIMIT 10000)"
+            )
+
+    async def recent_sent_memes(self, session, conversation, limit=5):
+        async with self.lock:
+            rows = await self._all(
+                "SELECT sent_at,details FROM sent_memes WHERE session=? AND conversation=? ORDER BY id DESC LIMIT ?",
+                (session, conversation, limit),
+            )
+            return [
+                {"sent_at": row["sent_at"], **json.loads(row["details"])} for row in reversed(rows)
+            ]
+
+    async def clear_sent_memes(self, session, conversation):
+        async with self.lock, self._transaction():
+            await self.conn.execute(
+                "DELETE FROM sent_memes WHERE session=? AND conversation=?", (session, conversation)
+            )
 
     async def new_generation(self) -> str:
         generation = uuid.uuid4().hex

@@ -111,6 +111,7 @@ async def test_sql_reads_committed_changes_without_stale_cache(db, image):
         "SELECT * FROM meta",
         "SELECT * FROM webhook_logs",
         "SELECT * FROM annotations",
+        "SELECT * FROM sent_memes",
         "SELECT raw FROM memes",
         "WITH memes AS (SELECT * FROM catalog.images) SELECT * FROM memes",
         "SELECT load_extension('nope')",
