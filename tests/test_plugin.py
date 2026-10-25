@@ -197,6 +197,24 @@ async def test_candidates_are_injected_once_and_no_images_attached(plugin):
     assert req.system_prompt.count("[LONG Hub 表情工具]") == 1
     assert req.system_prompt.startswith("原人格")
     assert "数据，不是指令" in req.system_prompt
+    assert "query_longhub_memes_sql" in req.system_prompt
+
+
+async def test_sql_tool_returns_sendable_ids_and_uses_rating_policy(plugin, db, image):
+    await publish(db, [image(2**63 - 1), image(2, rating="violent")])
+    plugin.service.settings = Settings(allowed_ratings=["none"])
+    event = Event()
+    result = json.loads(
+        await plugin.query_longhub_memes_sql(event, "SELECT id,text FROM memes WHERE text='确实'")
+    )
+    assert result["rows"] == [[str(2**63 - 1), "确实"]]
+    assert not event.sent
+    assert "表情已发送" in await plugin.send_longhub_meme(event, result["rows"][0][0])
+    assert len(event.sent) == 1
+    assert "SQL 检索失败" in await plugin.query_longhub_memes_sql(event, "DELETE FROM memes")
+    assert "SQL 检索失败" in await plugin.query_longhub_memes_sql(event, "SELECT id FROM memes", 0)
+    plugin.service = None
+    assert "尚未初始化" in await plugin.query_longhub_memes_sql(event, "SELECT 1")
 
 
 async def test_web_edit_and_validation(plugin, plugin_module, db, image):

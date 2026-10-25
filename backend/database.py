@@ -6,10 +6,12 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
+from threading import Event
 
 import aiosqlite
 
 from .models import PROMPT_VERSION, RATINGS, normalize_image, tokenize
+from .sql_query import query_catalog, validate_query
 
 
 def dump(value) -> str:
@@ -22,6 +24,7 @@ class Database:
     def __init__(self, path: Path):
         self.path = path
         self.lock = asyncio.Lock()
+        self.query_lock = asyncio.Lock()
         self.conn: aiosqlite.Connection | None = None
 
     async def open(self):
@@ -377,6 +380,19 @@ class Database:
             query=query, limit=limit, enabled="true", recent=recent, ratings=ratings
         )
         return result["items"]
+
+    async def query_sql(self, sql, limit=10, ratings=RATINGS):
+        validate_query(sql, limit)
+        # An independent read snapshot keeps model queries off the live writer and
+        # event loop. Serialize copies to bound memory when tools run in parallel.
+        async with self.query_lock:
+            stop = Event()
+            try:
+                return await asyncio.to_thread(
+                    query_catalog, self.path, sql, limit, tuple(ratings), stop
+                )
+            finally:
+                stop.set()
 
     async def missing_annotation_ids(self):
         async with self.lock:

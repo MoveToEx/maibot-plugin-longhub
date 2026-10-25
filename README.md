@@ -50,15 +50,40 @@ Docker 部署时将 `webhook_host` 改成 `0.0.0.0`，并给现有 AstrBot 服�
 | 工具 | 参数 | 行为 |
 | --- | --- | --- |
 | `search_longhub_memes` | `query: string`, `limit: number = 5` | 按文字、描述和标签搜索，返回字符串 ID、文字、分级、描述及标签 |
+| `query_longhub_memes_sql` | `sql: string`, `limit: number = 10` | 使用只读 SQLite SQL 精确匹配文字、标签交集、排除条件或统计，最多返回 50 行 |
 | `send_longhub_meme` | `image_id: string`, `position: string = "before"` | 模型选择 `before`（文字前）或 `after`（文字后）发送；单个入站事件最多发送一张 |
 
-聊天模型需要支持工具调用，并在 AstrBot 中启用这两个插件工具。候选只提供参考，没有合适的表情时模型可以不发送。所有分级默认开放，可在设置中限制；本地禁用和分级限制同时应用于搜索与发送。
+聊天模型需要支持工具调用，并在 AstrBot 中启用上述插件工具。候选只提供参考，没有合适的表情时模型可以不发送。所有分级默认开放，可在设置中限制；本地禁用和分级限制同时应用于普通搜索、SQL 查询与发送。
 
 模型可以把**只发一张龙图、完全不附加文字**作为本轮的完整回复，不需要补确认语、解释或占位文字。是否配文由模型根据语境决定。为兼容拒绝空文本的模型，纯图回复使用插件会隐藏的内部结束标记，普通与流式输出均不会把标记发送到聊天里。
 
 需要配文时，模型自主填写 `position`：`before` 会在文字前发送龙图；`after` 会先排队，等本轮正文的全部分段或流式输出完成后再发送。两者都支持空正文，只发图时无需为了触发发送而补话。旧调用省略该参数时仍默认为 `before`。排队的图片也计入每轮一张的限制；回复被取消或模型生成失败时不补发排队图片。
 
 检索使用 CJK 双字切分和英文词切分，配合 SQLite FTS5/BM25；模型可以用同义词重新搜索。近期使用的表情降低优先级，不依赖额外向量服务。
+
+SQL 工具提供两张表，结构会直接写入工具说明，模型可自行组织查询：
+
+| 表 | 字段 |
+| --- | --- |
+| `memes` | `id TEXT`、`text TEXT`、`rating TEXT`、`description TEXT`、`tags TEXT`（有效标签 JSON 数组）、`annotation_fresh INTEGER`（0/1） |
+| `meme_tags` | `image_id TEXT`、`tag TEXT`，每张图的每个有效标签一行 |
+
+`id` 使用十进制字符串，可直接交给发送工具；`description` 优先使用人工描述。有效标签已合并 Hub、AI 和人工来源并移除屏蔽标签；`annotation_fresh=1` 表示 AI 标注仍匹配当前图片、文字和提示词版本。标签是精确文本，需要模糊匹配时可显式使用 `LIKE`。例如，查找同时含「开心」「龙」且不含「哭泣」的图片：
+
+```sql
+SELECT m.id, m.text, m.tags
+FROM memes AS m
+WHERE m.rating = 'none'
+  AND EXISTS (SELECT 1 FROM meme_tags t WHERE t.image_id = m.id AND t.tag = '开心')
+  AND EXISTS (SELECT 1 FROM meme_tags t WHERE t.image_id = m.id AND t.tag = '龙')
+  AND NOT EXISTS (SELECT 1 FROM meme_tags t WHERE t.image_id = m.id AND t.tag = '哭泣')
+ORDER BY CAST(m.id AS INTEGER) DESC
+LIMIT 10;
+```
+
+支持单条 `SELECT` 或 `WITH … SELECT`，以及关联、子查询、聚合和 `json_each`。返回 `columns`、`rows`（按列排列的行数组）和 `truncated`；超出返回行数或大小时 `truncated=true`，可缩小条件或显式分页继续查找。SQL 最长 8192 字节，返回最多 50 行、32 KiB，并受执行时间和指令数限制。
+
+每次查询从已提交目录生成独立的内存快照，只包含当前启用且符合分级设置的元数据。源数据库以只读方式打开，在执行模型 SQL 前已断开；SQL 无法访问 webhook 日志、设置、原始上游载荷、临时同步代次或外部文件。查询在后台线程执行，不占用目录写连接；同步、标注、人工修订与分级变化会在下次查询生效。发送时仍会重新校验条目是否可用。
 
 在目录中点击图片即可查看 Hub／AI／人工标签来源，添加人工标签、屏蔽错误标签、编写人工描述，或禁止模型使用该条目。有效标签为三类来源合并后扣除屏蔽列表；人工描述优先于 AI 描述。上游 `text` 和 `rating` 只读。人工修订独立保存，即使上游条目删除、以后恢复，也能保留本地设置。
 
