@@ -49,8 +49,8 @@ Docker 部署时将 `webhook_host` 改成 `0.0.0.0`，并给现有 AstrBot 服�
 
 | 工具 | 参数 | 行为 |
 | --- | --- | --- |
-| `search_longhub_memes` | `query: string`, `limit: number = 5` | 按文字、描述和标签搜索，返回字符串 ID、文字、分级、描述及标签 |
-| `query_longhub_memes_sql` | `sql: string`, `limit: number = 10` | 使用只读 SQLite SQL 精确匹配文字、标签交集、排除条件或统计，最多返回 50 行 |
+| `search_longhub_memes` | `query: string`, `limit: number = 5` | 难以提取标签或标签搜索无合适结果时，按文字、描述或含义回退检索；返回字符串 ID、文字、分级、描述及标签 |
+| `query_longhub_memes_sql` | `sql: string`, `limit: number = 10` | 优先按英文下划线标签查询，支持标签交集、排除条件、统计，以及回退文字检索；最多返回 50 行 |
 | `send_longhub_meme` | `image_id: string`, `position: string = "before"` | 模型选择 `before`（文字前）或 `after`（文字后）发送；单个入站事件最多发送一张 |
 
 聊天模型需要支持工具调用，并在 AstrBot 中启用上述插件工具。候选只提供参考，没有合适的表情时模型可以不发送。所有分级默认开放，可在设置中限制；本地禁用和分级限制同时应用于普通搜索、SQL 查询与发送。
@@ -59,7 +59,9 @@ Docker 部署时将 `webhook_host` 改成 `0.0.0.0`，并给现有 AstrBot 服�
 
 需要配文时，模型自主填写 `position`：`before` 会在文字前发送龙图；`after` 会先排队，等本轮正文的全部分段或流式输出完成后再发送。两者都支持空正文，只发图时无需为了触发发送而补话。旧调用省略该参数时仍默认为 `before`。排队的图片也计入每轮一张的限制；回复被取消或模型生成失败时不补发排队图片。
 
-检索使用 CJK 双字切分和英文词切分，配合 SQLite FTS5/BM25；模型可以用同义词重新搜索。近期使用的表情降低优先级，不依赖额外向量服务。
+模型检索时优先从语境提取主体、作品、情绪、动作或场景标签，将标签转换为英文小写，并用下划线代替单词间的空格，例如「原神」→`genshin_impact`、「开心」→`happy`、「龙」→`dragon`。优先通过 SQL 查询 `meme_tags.tag`，用 `=` 精确匹配；多个标签可组合查询。仅在难以提取合适标签，或按标签搜索没有合适结果时，再回落到图片文字、描述或自然语言意图检索。文字检索可保留中文等原语言。
+
+普通检索使用 CJK 双字切分和英文词切分，配合 SQLite FTS5/BM25，匹配文字、描述和标签；模型可以用同义词重新搜索。近期使用的表情降低优先级，不依赖额外向量服务。
 
 SQL 工具提供两张表，结构会直接写入工具说明，模型可自行组织查询：
 
@@ -68,15 +70,15 @@ SQL 工具提供两张表，结构会直接写入工具说明，模型可自行�
 | `memes` | `id TEXT`、`text TEXT`、`rating TEXT`、`description TEXT`、`tags TEXT`（有效标签 JSON 数组）、`annotation_fresh INTEGER`（0/1） |
 | `meme_tags` | `image_id TEXT`、`tag TEXT`，每张图的每个有效标签一行 |
 
-`id` 使用十进制字符串，可直接交给发送工具；`description` 优先使用人工描述。有效标签已合并 Hub、AI 和人工来源并移除屏蔽标签；`annotation_fresh=1` 表示 AI 标注仍匹配当前图片、文字和提示词版本。标签是精确文本，需要模糊匹配时可显式使用 `LIKE`。例如，查找同时含「开心」「龙」且不含「哭泣」的图片：
+`id` 使用十进制字符串，可直接交给发送工具；`description` 优先使用人工描述。有效标签已合并 Hub、AI 和人工来源并移除屏蔽标签；`annotation_fresh=1` 表示 AI 标注仍匹配当前图片、文字和提示词版本。标签按精确文本匹配；需要模糊匹配时可显式使用 `LIKE`，注意下划线在 `LIKE` 中是通配符，精确查询 `genshin_impact` 应使用 `=`。例如，查找同时含 `happy`、`dragon` 且不含 `crying` 的图片：
 
 ```sql
 SELECT m.id, m.text, m.tags
 FROM memes AS m
 WHERE m.rating = 'none'
-  AND EXISTS (SELECT 1 FROM meme_tags t WHERE t.image_id = m.id AND t.tag = '开心')
-  AND EXISTS (SELECT 1 FROM meme_tags t WHERE t.image_id = m.id AND t.tag = '龙')
-  AND NOT EXISTS (SELECT 1 FROM meme_tags t WHERE t.image_id = m.id AND t.tag = '哭泣')
+  AND EXISTS (SELECT 1 FROM meme_tags t WHERE t.image_id = m.id AND t.tag = 'happy')
+  AND EXISTS (SELECT 1 FROM meme_tags t WHERE t.image_id = m.id AND t.tag = 'dragon')
+  AND NOT EXISTS (SELECT 1 FROM meme_tags t WHERE t.image_id = m.id AND t.tag = 'crying')
 ORDER BY CAST(m.id AS INTEGER) DESC
 LIMIT 10;
 ```
