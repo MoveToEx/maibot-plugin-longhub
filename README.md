@@ -11,6 +11,8 @@
 
 插件本身只持久化 SQLite 目录、人工修订、模型标注、任务和日志。R2 图片在需要时读入内存；调用 AstrBot 标准发送和视觉接口时，框架可能生成并清理临时图片。不执行图片上传或上游元数据修改。
 
+管理面板为 React + Vite + React Router + Tailwind CSS SPA，使用 [Base UI](https://base-ui.com/react/overview/quick-start) 提供弹窗、选择器、开关、复选框和按钮。支持桌面与手机布局，跟随 AstrBot 的亮色／暗色主题；目录筛选、分页和表情详情使用 Hash 路由，支持刷新与前进、后退。安装包已包含构建产物，部署时无需 Node.js 或前端构建步骤。
+
 ## 安装与首次配置
 
 1. 将本项目放入 AstrBot 的 `data/plugins/astrbot_plugin_longhub/`，或在插件管理中上传打包后的 ZIP。运行环境安装 `requirements.txt` 中的依赖，重载插件。
@@ -113,7 +115,19 @@ v0.1.5 更新了标注提示词版本，旧 AI 描述和标签仍可检索，但
 
 ## 开发、检查与打包
 
-依赖由 `pyproject.toml` 与 `uv.lock` 管理。`requirements.txt` 为 AstrBot 插件安装器保留运行依赖入口。
+Python 依赖由 `pyproject.toml` 与 `uv.lock` 管理。`requirements.txt` 为 AstrBot 插件安装器保留运行依赖入口。
+
+前端源码位于 `frontend/`，依赖使用 `package.json` 与 `package-lock.json` 锁定，构建环境需要 Node.js 22.22 或以上。Vite 将静态产物输出到 `views/catalog/`，该目录随 Git 和插件包一同发布。修改前端后先构建，再执行浏览器验收与打包：
+
+```powershell
+cd frontend
+npm ci
+npm run format:check
+npm run build
+cd ..
+```
+
+`npm run dev` 提供本地 Vite 开发服务器；脱离 AstrBot 打开时会显示桥接连接提示。使用下方浏览器检查命令，可在本机通过内存中的桥接数据完整验收构建后的面板，不需要登录真实 AstrBot。
 
 ```powershell
 $env:UV_CACHE_DIR = Join-Path $PWD '.uv-cache'
@@ -126,6 +140,6 @@ uv run --group browser python -m tools.check_ui
 uv run python tools/package.py
 ```
 
-测试使用本机临时 HTTP 服务和可控的模型／AstrBot 接口替身，不需要真实 Appkey。覆盖流校验、切换竞态、延迟通知、持久化恢复、标签保护、模型任务和聊天工具边界。可选的浏览器检查使用本机 Microsoft Edge 和内存中的桥接数据，检查页面交互、深色主题与手机布局；不请求远程图片。部署时仍需用真实 Appkey、公网 webhook、视觉提供商和 NapCat 完成联调。
+测试使用本机临时 HTTP 服务和可控的模型／AstrBot 接口替身，不需要真实 Appkey。覆盖流校验、切换竞态、延迟通知、持久化恢复、标签保护、模型任务和聊天工具边界。浏览器检查使用本机 Microsoft Edge，验证路由刷新、前进后退、筛选分页、详情编辑、超长 ID、错误重试、队列操作、密钥与表单保存、暗色主题和五个页面的手机布局，并在与 AstrBot 相同限制的沙箱 iframe 中验证桥接调用。图片和接口响应均为内存测试数据，截图保存在忽略的 `.preview-data/` 中。部署时仍需用真实 Appkey、公网 webhook、视觉提供商和 NapCat 完成联调。
 
 协议来源：[LONG Hub Catalog Sync](https://docs.longhub.top/catalog-sync.html)、[Webhook](https://docs.longhub.top/webhook.html)、[AstrBot Plugin Views](https://docs.astrbot.app/en/dev/star/guides/plugin-pages.html)。参考 [smart_imagechat_hub](https://github.com/QingchenWait/astrbot_plugin_smart_imagechat_hub) 和 [meme_manager](https://github.com/anka-afk/astrbot_plugin_meme_manager) 的集成与管理交互，本插件独立实现。

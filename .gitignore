@@ -11,3 +11,6 @@ htmlcov/
 .test-tmp/
 .preview-data/
 dist/
+node_modules/
+.npm-cache/
+*.tsbuildinfo
