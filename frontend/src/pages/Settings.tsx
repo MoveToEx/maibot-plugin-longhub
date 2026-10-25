@@ -146,6 +146,19 @@ function SettingsForm({ data, reload }: { data: SettingsData; reload: () => void
   ];
   if (s.vision_provider_id && !providers.some((provider) => provider.id === s.vision_provider_id))
     options.push({ value: s.vision_provider_id, label: `${s.vision_provider_id}（当前不可用）` });
+  const embeddingProviders = data.embedding_providers ?? [];
+  const embeddingOptions = [
+    { value: '', label: '暂不启用语义检索' },
+    ...embeddingProviders.map((provider) => ({ value: provider.id, label: provider.name })),
+  ];
+  if (
+    s.embedding_provider_id &&
+    !embeddingProviders.some((provider) => provider.id === s.embedding_provider_id)
+  )
+    embeddingOptions.push({
+      value: s.embedding_provider_id,
+      label: `${s.embedding_provider_id}（当前不可用）`,
+    });
   return (
     <form
       id="settings-form"
@@ -163,6 +176,7 @@ function SettingsForm({ data, reload }: { data: SettingsData; reload: () => void
           'max_image_mb',
           'webhook_log_days',
           'webhook_log_limit',
+          'embedding_rpm',
         ];
         for (const key of [
           'api_base',
@@ -170,6 +184,7 @@ function SettingsForm({ data, reload }: { data: SettingsData; reload: () => void
           'webhook_secret',
           'webhook_host',
           'vision_provider_id',
+          'embedding_provider_id',
         ]) {
           const value = String(form.get(key) ?? '').trim();
           if (['app_key', 'webhook_secret'].includes(key) && !value) continue;
@@ -357,6 +372,42 @@ function SettingsForm({ data, reload }: { data: SettingsData; reload: () => void
               ))}
             </div>
           </div>
+        </SettingsSection>
+        <SettingsSection
+          title="语义检索"
+          description="使用 AstrBot 的 Embedding 提供商和内置向量库理解表情含义。"
+          icon={<Sparkles size={18} />}
+        >
+          <div className="form-grid">
+            <label className="field-label">
+              Embedding 提供商
+              <SelectField
+                label="Embedding 提供商"
+                name="embedding_provider_id"
+                defaultValue={s.embedding_provider_id || ''}
+                options={embeddingOptions}
+              />
+              <span className="field-note">
+                在 AstrBot 提供商设置中添加嵌入模型，无需在此填写密钥。
+              </span>
+            </label>
+            <Field
+              title="每分钟最多 Embedding 请求数"
+              name="embedding_rpm"
+              type="number"
+              value={s.embedding_rpm ?? 30}
+              min={1}
+              max={600}
+              note="后台向量化与概念查询合计限速，每个后台批次最多 16 张。"
+            />
+          </div>
+          <p className="text-xs text-muted leading-7">
+            可发送图片的有效标注覆盖率严格超过
+            50%，且向量索引同步完成后，模型会优先用概念搜索，再判断是否发送。有效标注包括当前视觉标注与人工描述或标签；过期视觉标注和仅有上游标签的图片不计入覆盖率。
+          </p>
+          <p className="text-xs text-muted leading-7 mt-2">
+            选择后会自动在后台建立索引并调用嵌入模型，可在「标注任务」中查看进度和重建索引。模型、维度或标注发生变化时会自动更新。
+          </p>
         </SettingsSection>
         <SettingsSection
           title="日志保留"

@@ -31,6 +31,20 @@ export interface Status {
   last_webhook: number | null;
   sync_error?: string | null;
   background_error?: string | null;
+  semantic?: SemanticStatus;
+}
+export interface SemanticStatus {
+  configured: boolean;
+  provider_id: string;
+  model: string;
+  total: number;
+  annotated: number;
+  coverage: number;
+  indexed: number;
+  pending: number;
+  available: boolean;
+  state: string;
+  error: string | null;
 }
 export interface WebhookLog {
   id: number;
@@ -60,6 +74,8 @@ export interface Settings {
   sync_interval_hours: number;
   image_hosts: string[];
   vision_provider_id: string;
+  embedding_provider_id: string;
+  embedding_rpm: number;
   tagging_rpm: number;
   tagging_concurrency: number;
   candidate_limit: number;
@@ -72,6 +88,7 @@ export interface Settings {
 export interface SettingsData {
   settings: Settings;
   providers: { id: string; name: string }[];
+  embedding_providers: { id: string; name: string }[];
 }
 export interface Bridge {
   ready(): Promise<unknown>;

@@ -16,7 +16,7 @@ PREFIX = "/api/v1/plugins/longhub/views/catalog/_t/test-session/"
 BRIDGE = r"""
 (() => {
  const settings = SETTINGS;
- settings.app_key_configured = true; settings.webhook_secret_configured = true;
+ settings.app_key_configured = true; settings.webhook_secret_configured = true; settings.embedding_provider_id='embedding';
  const items = Array.from({length:65}, (_,i) => ({
   id:i===0?'9223372036854775807':String(i+1),
   text:['确实','开心','吃瓜','摸鱼','收到','疑惑','晚安','加油'][i%8],
@@ -29,7 +29,8 @@ BRIDGE = r"""
  const status={total:65,ratings:{none:58,moderate:7,violent:0},pending_notifications:2,
   tag_jobs:{queued:12,running:1,done:48,failed:4},tagging_paused:false,ready:true,
   receiver:{started:true,error:null,listen:'127.0.0.1:8791',path:'/hooks/longhub'},
-  sync:{status:'done'},last_sync:{completed_at:1792886400},last_webhook:1792886460,vision_configured:true};
+  sync:{status:'done'},last_sync:{completed_at:1792886400},last_webhook:1792886460,vision_configured:true,
+  semantic:{configured:true,provider_id:'embedding',model:'embedding-demo',total:65,annotated:49,coverage:49/65,indexed:49,pending:0,available:true,state:'ready',error:null}};
  const logs=[
   {id:1,received:1792886460,image_id:'9223372036854775807',event:'update',signature_valid:true,
    http_status:204,processed:true,attempts:0,body:'{"event":"update"}'},
@@ -45,7 +46,7 @@ BRIDGE = r"""
    window.__calls.push({method:'GET',path,params:structuredClone(params)});
    if(window.__failNext===path){window.__failNext=null;throw new Error('测试读取失败，请重试');}
    if(path==='status')return structuredClone(status);
-   if(path==='settings')return {settings:structuredClone(settings),providers:[{id:'vision',name:'视觉模型'}]};
+   if(path==='settings')return {settings:structuredClone(settings),providers:[{id:'vision',name:'视觉模型'}],embedding_providers:[{id:'embedding',name:'嵌入模型'}]};
    if(path==='memes'){
     const list=items.filter(x=>(!params.q||x.text.includes(params.q)||x.effective_tags.some(t=>t.includes(params.q)))&&
      (!params.enabled||String(x.enabled)===params.enabled)&&(!params.rating||x.rating===params.rating)&&
@@ -77,6 +78,7 @@ BRIDGE = r"""
    if(path==='tagging/enqueue')return {queued:body.ids?.length||16};
    if(path==='sync')return {id:'test-sync',status:'queued'};
    if(path==='webhook/retry')return {queued:true};
+   if(path==='semantic/rebuild')return {queued:true};
    throw new Error('Unexpected POST '+path);
   }
  };
@@ -203,8 +205,17 @@ async def check():
                 await page.locator('[data-tab="tasks"]').click()
                 await page.locator("#pause-tagging").click()
                 await expect(page.locator("#pause-tagging")).to_contain_text("继续队列")
+                await expect(
+                    page.get_by_role("progressbar", name="有效标注覆盖率")
+                ).to_have_attribute("aria-valuenow", "75")
+                await page.locator("#rebuild-semantic").click()
+                await page.wait_for_function(
+                    "window.__calls.some(x=>x.method==='POST'&&x.path==='semantic/rebuild')"
+                )
+                await page.screenshot(path=str(output / "tasks.png"), full_page=True)
                 await page.locator('[data-tab="settings"]').click()
                 await page.locator('[name="tagging_rpm"]').fill("9")
+                await page.locator('[name="embedding_rpm"]').fill("12")
                 await page.get_by_role("switch", name="已在 LONG Hub 启用订阅", exact=True).click()
                 await page.get_by_role("checkbox", name="允许 violent", exact=True).uncheck()
                 await page.get_by_role("combobox", name="视觉标注提供商", exact=True).click()
@@ -216,8 +227,16 @@ async def check():
                 assert saved["allowed_ratings"] == ["none", "moderate"], saved
                 assert saved["auto_tagging"] is True and saved["webhook_ready"] is True, saved
                 assert saved["vision_provider_id"] == "", saved
+                assert (
+                    saved["embedding_provider_id"] == "embedding" and saved["embedding_rpm"] == 12
+                ), saved
                 await expect(page.locator('[name="tagging_rpm"]')).to_have_value("9")
                 await page.screenshot(path=str(output / "settings.png"), full_page=True)
+                await (
+                    page.locator('[name="embedding_rpm"]')
+                    .locator("xpath=ancestor::section")
+                    .screenshot(path=str(output / "embedding-settings.png"))
+                )
                 await page.locator('[data-tab="overview"]').click()
                 if await page.get_by_role("button", name="关闭通知", exact=True).count():
                     await page.get_by_role("button", name="关闭通知", exact=True).click()
@@ -234,7 +253,7 @@ async def check():
                     assert await page.evaluate(
                         "document.documentElement.scrollWidth <= innerWidth"
                     ), tab
-                    if tab in ["overview", "catalog"]:
+                    if tab in ["overview", "catalog", "tasks"]:
                         await page.screenshot(path=str(output / f"{tab}-mobile.png"))
                 await page.set_viewport_size({"width": 1440, "height": 1100})
                 await page.goto(url + "#/catalog/9223372036854775807")

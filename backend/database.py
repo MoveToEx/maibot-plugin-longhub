@@ -25,6 +25,7 @@ class Database:
         self.path = path
         self.lock = asyncio.Lock()
         self.query_lock = asyncio.Lock()
+        self.catalog_revision = 0
         self.conn: aiosqlite.Connection | None = None
 
     async def open(self):
@@ -296,6 +297,7 @@ class Database:
                     [(x,) for x in receipts],
                 )
                 await self.conn.commit()
+                self.catalog_revision += 1
             except BaseException:
                 await self.conn.rollback()
                 raise
@@ -323,6 +325,7 @@ class Database:
                     [(x,) for x in receipts],
                 )
                 await self.conn.commit()
+                self.catalog_revision += 1
             except BaseException:
                 await self.conn.rollback()
                 raise
@@ -352,6 +355,7 @@ class Database:
                 for row in await self._all("SELECT generation FROM images WHERE id=?", (ident,)):
                     await self._index(row[0], ident)
                 await self.conn.commit()
+                self.catalog_revision += 1
             except BaseException:
                 await self.conn.rollback()
                 raise
@@ -425,6 +429,33 @@ class Database:
             query=query, limit=limit, enabled="true", recent=recent, ratings=ratings
         )
         return result["items"]
+
+    async def semantic_catalog(self, ratings=RATINGS, ids=None):
+        """One consistent bulk read; no per-image annotation/override queries."""
+        if not ratings or ids == []:
+            return []
+        async with self.lock:
+            generation = await self._meta("active_generation")
+            where = (
+                "i.generation=? AND COALESCE(o.enabled,1)=1 AND i.rating IN ("
+                + ",".join("?" for _ in ratings)
+                + ")"
+            )
+            args = [generation, *ratings]
+            if ids is not None:
+                where += " AND i.id IN (" + ",".join("?" for _ in ids) + ")"
+                args.extend(int(ident) for ident in ids)
+            rows = await self._all(
+                f"""SELECT i.id,i.text,i.rating,i.image_key,i.hub_tags,
+                COALESCE(o.manual_tags,'[]') AS manual_tags,
+                COALESCE(o.excluded_tags,'[]') AS excluded_tags,o.description AS manual_description,
+                a.image_key AS ai_image_key,a.source_text AS ai_source_text,
+                a.prompt_version,a.description AS ai_description,a.tags AS ai_tags
+                FROM images i LEFT JOIN overrides o ON o.image_id=i.id
+                LEFT JOIN annotations a ON a.image_id=i.id WHERE {where} ORDER BY i.id""",
+                args,
+            )
+            return [dict(row) for row in rows]
 
     async def query_sql(self, sql, limit=10, ratings=RATINGS):
         validate_query(sql, limit)
@@ -626,6 +657,7 @@ class Database:
                     "SELECT generation FROM images WHERE id=?", (job["image_id"],)
                 ):
                     await self._index(gen[0], job["image_id"])
+        self.catalog_revision += 1
 
     async def fail_tag(self, job, error):
         async with self.lock:

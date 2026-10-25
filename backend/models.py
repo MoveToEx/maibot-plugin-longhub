@@ -84,6 +84,8 @@ class Settings:
     webhook_ready: bool = False
     sync_interval_hours: int = 24
     vision_provider_id: str = ""
+    embedding_provider_id: str = ""
+    embedding_rpm: int = 30
     tagging_rpm: int = 6
     tagging_concurrency: int = 1
     auto_tagging: bool = True
@@ -103,6 +105,7 @@ class Settings:
             "sync_interval_hours": (1, 720),
             "tagging_rpm": (1, 600),
             "tagging_concurrency": (1, 8),
+            "embedding_rpm": (1, 600),
             "candidate_limit": (1, 10),
             "max_image_mb": (1, 100),
             "webhook_log_days": (1, 365),
@@ -124,6 +127,7 @@ class Settings:
             "webhook_host",
             "webhook_secret",
             "vision_provider_id",
+            "embedding_provider_id",
         ):
             if not isinstance(defaults[key], str):
                 raise ValueError(f"{key} 必须是字符串")

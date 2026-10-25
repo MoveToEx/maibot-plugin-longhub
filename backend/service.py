@@ -9,6 +9,7 @@ from pathlib import Path
 from .client import HubClient
 from .database import Database
 from .models import Settings
+from .semantic import SemanticIndex
 from .sync import SyncEngine
 from .tagging import Tagger
 from .webhook import WebhookServer
@@ -17,13 +18,27 @@ logger = logging.getLogger(__name__)
 
 
 class Service:
-    def __init__(self, data_dir: Path, settings: Settings, generate):
+    def __init__(
+        self,
+        data_dir: Path,
+        settings: Settings,
+        generate,
+        *,
+        embedding_provider=None,
+        vector_store_factory=None,
+    ):
         self.settings = settings
         self.db = Database(data_dir / "catalog.sqlite3")
         self.client = HubClient(settings)
         self.sync = SyncEngine(self.db, self.client, settings)
         self.webhook = WebhookServer(self.db, settings)
         self.tagger = Tagger(self.db, self.client, settings, generate)
+        semantic_options = (
+            {"store_factory": vector_store_factory} if vector_store_factory is not None else {}
+        )
+        self.semantic = SemanticIndex(
+            self.db, data_dir, settings, embedding_provider, **semantic_options
+        )
         self.tasks = []
         self.sync_task = None
         self.stopping = False
@@ -39,6 +54,7 @@ class Service:
             self.tasks = [
                 asyncio.create_task(self._consumer()),
                 asyncio.create_task(self._scheduler()),
+                asyncio.create_task(self.semantic.run()),
             ]
             self.tasks.extend(
                 asyncio.create_task(self._tag_worker())
@@ -58,6 +74,7 @@ class Service:
         await asyncio.gather(*tasks, return_exceptions=True)
         await self.webhook.close()
         await self.client.close()
+        await self.semantic.close()
         await self.db.close()
 
     def start_sync(self):
@@ -150,6 +167,7 @@ class Service:
             "sync_error": await self.db.get_meta("sync_error"),
             "background_error": self.background_error,
             "vision_configured": bool(self.settings.vision_provider_id),
+            "semantic": await self.semantic.status(),
         }
 
     async def candidates(self, query, *, limit=None, recent=()):

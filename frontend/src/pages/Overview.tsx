@@ -281,6 +281,85 @@ export function Tasks() {
       <JobMetrics status={s} />
       <Panel>
         <PanelHeading
+          title="Embedding 语义检索"
+          description="把文本标注转成向量，按概念寻找合适的龙图。"
+          action={
+            <Badge
+              tone={s.semantic?.available ? 'success' : s.semantic?.error ? 'danger' : 'neutral'}
+            >
+              {
+                (
+                  {
+                    unconfigured: '未配置',
+                    empty: '目录为空',
+                    indexing: '索引同步中',
+                    insufficient: '标注覆盖率不足',
+                    ready: '语义工具已开放',
+                    error: '索引异常',
+                  } as Record<string, string>
+                )[s.semantic?.state || 'unconfigured']
+              }
+            </Badge>
+          }
+        />
+        <div className="grid sm:grid-cols-3 gap-5 my-6">
+          <div>
+            <p className="text-xs text-muted">有效标注覆盖率</p>
+            <p className="text-2xl font-semibold tabular-nums mt-2">
+              {((s.semantic?.coverage || 0) * 100).toFixed(1)}%
+            </p>
+            <p className="text-[11px] text-muted mt-2">
+              {s.semantic?.annotated || 0} / {s.semantic?.total || 0} 张可发送图片
+            </p>
+          </div>
+          <div>
+            <p className="text-xs text-muted">已向量化</p>
+            <p className="text-2xl font-semibold tabular-nums mt-2">{s.semantic?.indexed || 0}</p>
+            <p className="text-[11px] text-muted mt-2">待索引 {s.semantic?.pending || 0} 张</p>
+          </div>
+          <div>
+            <p className="text-xs text-muted">嵌入模型</p>
+            <p className="text-sm font-medium break-all mt-3">{s.semantic?.model || '尚未选择'}</p>
+            <p className="text-[11px] text-muted mt-2">AstrBot 内置向量库</p>
+          </div>
+        </div>
+        <div
+          className="distribution-track"
+          role="progressbar"
+          aria-label="有效标注覆盖率"
+          aria-valuenow={Math.round((s.semantic?.coverage || 0) * 100)}
+          aria-valuemin={0}
+          aria-valuemax={100}
+        >
+          <span style={{ width: `${(s.semantic?.coverage || 0) * 100}%` }} />
+        </div>
+        {s.semantic?.error && (
+          <p className="inline-error" role="alert">
+            {s.semantic.error}
+          </p>
+        )}
+        <div className="panel-footer">
+          <p className="text-xs text-muted leading-7 flex-1">
+            覆盖率严格超过 50% 且索引就绪后，优先开放语义工具。重建会重新调用嵌入模型。
+          </p>
+          <Button
+            id="rebuild-semantic"
+            disabled={pending || !s.semantic?.configured || s.semantic?.state === 'indexing'}
+            onClick={() =>
+              run(async () => {
+                await api.post('semantic/rebuild');
+                notify('向量索引重建已排队，后台将重新向量化文本标注。');
+                refresh();
+              })
+            }
+          >
+            <RefreshCw size={14} />
+            重建向量索引
+          </Button>
+        </div>
+      </Panel>
+      <Panel>
+        <PanelHeading
           title="视觉标签补全"
           description="复用 AstrBot 中的视觉提供商，按既定速率在后台处理。"
           action={

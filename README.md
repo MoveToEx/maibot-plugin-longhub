@@ -8,8 +8,9 @@
 - 首版发送路径以 **OneBot v11／NapCat** 验收；其他适配器尚未联调。
 - 一个有效的 LONG Hub Appkey，以及可以被公网 HTTPS 访问的 webhook 回调地址。
 - 可选：AstrBot 中已配置的原生视觉模型。首版以 OpenAI 兼容提供商验收，文字模型不适用于标注。
+- 可选：AstrBot 中已配置的 Embedding 提供商及内置 FAISS 知识库组件，用于按概念检索。
 
-插件本身只持久化 SQLite 目录、人工修订、模型标注、任务和日志。R2 图片在需要时读入内存；调用 AstrBot 标准发送和视觉接口时，框架可能生成并清理临时图片。不执行图片上传或上游元数据修改。
+插件本身只持久化 SQLite 目录、人工修订、模型标注、向量索引、任务和日志。R2 图片在需要时读入内存；调用 AstrBot 标准发送和视觉接口时，框架可能生成并清理临时图片。不执行图片上传或上游元数据修改。
 
 管理面板为 React + Vite + React Router + Tailwind CSS SPA，使用 [Base UI](https://base-ui.com/react/overview/quick-start) 提供弹窗、选择器、开关、复选框和按钮。采用顶部导航，手机端可横向滚动，跟随 AstrBot 的亮色／暗色主题；目录筛选、分页和表情详情使用 Hash 路由，支持刷新与前进、后退。安装包已包含构建产物，部署时无需 Node.js 或前端构建步骤。
 
@@ -26,6 +27,7 @@
 
 5. 启用 Hub 订阅后，回到插件页面勾选「已在 LONG Hub 启用订阅」并保存，首次全量同步会自动开始。概览中可查看导入、校验及补齐通知的进度。
 6. 需要视觉标签时，选择已配置的 AstrBot 视觉提供商。在目录中勾选条目进行标注，或在「标注任务」为全部未标注图片排队。默认不会自动全库调用模型。
+7. 需要语义检索时，在「连接与设置 → 语义检索」选择已配置的 AstrBot Embedding 提供商并保存。后台会自动向量化有效标注，可在「标注任务」查看覆盖率、索引进度和重建操作。严格超过 50% 且索引完整时，语义工具才会对聊天模型开放。
 
 不要把 LONG Hub Appkey 填为 webhook secret，也不要给回调 URL 配置额外的浏览器登录。管理接口由 AstrBot 自身鉴权，独立接收端口只提供 HMAC 校验的 webhook 与无敏感信息的 `/health`。
 
@@ -47,12 +49,13 @@ Docker 部署时将 `webhook_host` 改成 `0.0.0.0`，并给现有 AstrBot 服�
 
 ## 聊天与人工管理
 
-插件在 LLM 请求时按当前消息检索最多五个候选，作为临时系统提示附加，不修改人格。模型可调用：
+语义索引就绪时，插件引导模型先用自然语言概念检索；尚未就绪时，按当前消息提供最多五个文字候选，并引导模型优先查询标签。提示临时附加到本次请求，不修改人格。模型可调用：
 
 | 工具 | 参数 | 行为 |
 | --- | --- | --- |
+| `search_longhub_memes_semantic` | `concept: string`, `limit: number = 5` | 有效标注覆盖率严格超过 50% 且索引就绪时开放；使用 AstrBot Embedding 按概念、画面或使用场景寻找最匹配的候选，返回相似度供模型判断，不自动发送 |
 | `search_longhub_memes` | `query: string`, `limit: number = 5` | 难以提取标签或标签搜索无合适结果时，按文字、描述或含义回退检索；返回字符串 ID、文字、分级、描述及标签 |
-| `query_longhub_memes_sql` | `sql: string`, `limit: number = 10` | 优先同时按英文、中文多个标签与同义词查询，取并集扩大匹配范围；也支持组合条件、统计和回退文字检索；最多返回 50 行 |
+| `query_longhub_memes_sql` | `sql: string`, `limit: number = 10` | 语义检索不可用或结果不合适时，同时按英文、中文多个标签与同义词查询，取并集扩大匹配范围；也支持组合条件、统计和回退文字检索；最多返回 50 行 |
 | `send_longhub_meme` | `image_id: string`, `position: string = "before"` | 模型选择 `before`（文字前）或 `after`（文字后）发送；单个入站事件最多发送一张 |
 
 聊天模型需要支持工具调用，并在 AstrBot 中启用上述插件工具。候选只提供参考，没有合适的表情时模型可以不发送。所有分级默认开放，可在设置中限制；本地禁用和分级限制同时应用于普通搜索、SQL 查询与发送。
@@ -67,11 +70,11 @@ Docker 部署时将 `webhook_host` 改成 `0.0.0.0`，并给现有 AstrBot 服�
 
 需要配文时，模型自主填写 `position`：`before` 会在文字前发送龙图；`after` 会先排队，等本轮正文的全部分段或流式输出完成后再发送。两者都支持空正文，只发图时无需为了触发发送而补话。旧调用省略该参数时仍默认为 `before`。排队的图片也计入每轮一张的限制；回复被取消或模型生成失败时不补发排队图片。
 
-模型检索时优先从语境提取主体、作品、情绪、动作或场景等多个相关标签，同一轮同时使用英文、中文和常用同义词，兼顾 LONG Hub 标签与视觉模型标注。英文使用小写、下划线代替单词间空格，同时保留中文对应词，例如作品用 `genshin_impact`、`原神`，情绪用 `happy`、`开心`、`高兴`，贴脸素材可用 `龙脸`。
+语义工具开放时，模型优先直接描述想表达的概念或对话场景，例如「嘴上说无所谓，其实非常羡慕的反应」。结果不合适、为空或工具暂不可用时，再从语境提取主体、作品、情绪、动作或场景等多个相关标签，同一轮同时使用英文、中文和常用同义词，兼顾 LONG Hub 标签与视觉模型标注。英文使用小写、下划线代替单词间空格，同时保留中文对应词，例如作品用 `genshin_impact`、`原神`，情绪用 `happy`、`开心`、`高兴`，贴脸素材可用 `龙脸`。
 
-优先通过 SQL 查询 `meme_tags.tag`，先以 `IN/OR` 取相关标签的并集扩大匹配范围，再按命中标签数和对话语境挑选。只有语境明确要求多个概念同时成立时才在概念组之间使用 `AND`，组内仍取中英文与同义词的并集；避免要求同一图片同时拥有同一概念的中英文标签。仅在难以提取合适标签，或放宽标签条件、扩展同义词后仍没有合适结果时，再回落到图片文字、描述或自然语言意图检索。文字检索可保留中文等原语言。
+标签检索通过 SQL 查询 `meme_tags.tag`，先以 `IN/OR` 取相关标签的并集扩大匹配范围，再按命中标签数和对话语境挑选。只有语境明确要求多个概念同时成立时才在概念组之间使用 `AND`，组内仍取中英文与同义词的并集；避免要求同一图片同时拥有同一概念的中英文标签。仅在难以提取合适标签，或放宽标签条件、扩展同义词后仍没有合适结果时，再回落到图片文字、描述或自然语言意图检索。文字检索可保留中文等原语言。
 
-普通检索使用 CJK 双字切分和英文词切分，配合 SQLite FTS5/BM25，匹配文字、描述和标签；模型可以用同义词重新搜索。近期使用的表情降低优先级，不依赖额外向量服务。
+普通检索使用 CJK 双字切分和英文词切分，配合 SQLite FTS5/BM25，匹配文字、描述和标签；模型可以用同义词重新搜索。普通候选对近期表情降权，语义候选带有近期已发送标记，供模型避免重复。
 
 SQL 工具提供两张表，结构会直接写入工具说明，模型可自行组织查询：
 
@@ -97,6 +100,16 @@ LIMIT 10;
 每次查询从已提交目录生成独立的内存快照，只包含当前启用且符合分级设置的元数据。源数据库以只读方式打开，在执行模型 SQL 前已断开；SQL 无法访问 webhook 日志、设置、原始上游载荷、临时同步代次或外部文件。查询在后台线程执行，不占用目录写连接；同步、标注、人工修订与分级变化会在下次查询生效。发送时仍会重新校验条目是否可用。
 
 在目录中点击图片即可查看 Hub／AI／人工标签来源，添加人工标签、屏蔽错误标签、编写人工描述，或禁止模型使用该条目。有效标签为三类来源合并后扣除屏蔽列表；人工描述优先于 AI 描述。上游 `text` 和 `rating` 只读。人工修订独立保存，即使上游条目删除、以后恢复，也能保留本地设置。
+
+## Embedding 语义检索
+
+复用 AstrBot 的 Embedding 提供商和内置 `FaissVecDB`，独立维护本插件的文档及向量缓存，无需另建向量服务，也不混入已有知识库。只将文本描述、图片文字和有效标签交给嵌入模型，不向 Embedding 接口发送图片。相似度按归一化向量计算，越大越相关，分数并非正确率；模型仍需阅读候选描述、判断是否贴合语境，再调用发送工具。
+
+覆盖率的分母是当前启用且符合允许分级的图片；分子是有非空人工描述、有效人工标签，或仍匹配当前图片、文字及提示词版本的 AI 描述／标签的图片。LONG Hub 原始文字、标签本身不算补全标注；过期 AI 标注不参与向量检索，屏蔽标签也会移除。恰好 50% 时不会开放工具。配置了提供商后，后台即开始增量索引；严格超过 50% 且全部有效标注完成索引时，在本次聊天请求的工具集中开放 `search_longhub_memes_semantic`，同时提示模型优先采用语义检索。低于门槛、提供商异常或更新未完成时，暂用标签与文字检索。
+
+默认每分钟最多 30 次 Embedding 调用，概念查询与后台索引合计限速，后台每批最多 16 条。保存提供商后会产生文本向量化调用，请按所选模型计费方式配置。新增标注、人工修订、图片／文字变化、禁用、删除和分级设置变化会自动更新索引；完整校准但标注未变时不会重复向量化。模型或维度变化时重建，避免混用不同向量空间；正常重启会复用原索引。
+
+「标注任务」显示有效覆盖率、已向量化数量、待索引数量、模型和异常摘要，可手动「重建向量索引」。重建只重新调用 Embedding，不重新做视觉标注。缓存位于 `data/plugin_data/longhub/semantic/`，仅包含文本元数据、SQLite 文档库和 FAISS 向量文件，不保存图片。原生文档库与 FAISS 写入中断、缓存损坏或不一致时会自动重建；没有可用的 AstrBot FAISS 组件时，仍可使用同步及普通搜索。
 
 ## 同步、恢复与日志
 
@@ -146,6 +159,6 @@ uv run --group browser python -m tools.check_ui
 uv run python tools/package.py
 ```
 
-测试使用本机临时 HTTP 服务和可控的模型／AstrBot 接口替身，不需要真实 Appkey。覆盖流校验、切换竞态、延迟通知、持久化恢复、标签保护、模型任务和聊天工具边界。浏览器检查使用本机 Microsoft Edge，验证路由刷新、前进后退、筛选分页、详情编辑、超长 ID、错误重试、队列操作、密钥与表单保存、暗色主题和五个页面的手机布局，并在与 AstrBot 相同限制的沙箱 iframe 中验证桥接调用。图片和接口响应均为内存测试数据，截图保存在忽略的 `.preview-data/` 中。部署时仍需用真实 Appkey、公网 webhook、视觉提供商和 NapCat 完成联调。
+测试使用本机临时 HTTP 服务和可控的模型／AstrBot 接口替身，不需要真实 Appkey。覆盖流校验、切换竞态、延迟通知、持久化恢复、标签保护、模型任务、语义覆盖率门槛、索引更新与恢复、提供商变更以及聊天工具边界。浏览器检查使用本机 Microsoft Edge，验证路由刷新、前进后退、筛选分页、详情编辑、超长 ID、错误重试、队列与向量重建操作、密钥与表单保存、暗色主题和五个页面的手机布局，并在与 AstrBot 相同限制的沙箱 iframe 中验证桥接调用。图片和接口响应均为内存测试数据，截图保存在忽略的 `.preview-data/` 中。部署时仍需用真实 Appkey、公网 webhook、视觉／Embedding 提供商和 NapCat 完成联调。
 
-协议来源：[LONG Hub Catalog Sync](https://docs.longhub.top/catalog-sync.html)、[Webhook](https://docs.longhub.top/webhook.html)、[AstrBot Plugin Views](https://docs.astrbot.app/en/dev/star/guides/plugin-pages.html)。参考 [smart_imagechat_hub](https://github.com/QingchenWait/astrbot_plugin_smart_imagechat_hub) 和 [meme_manager](https://github.com/anka-afk/astrbot_plugin_meme_manager) 的集成与管理交互，本插件独立实现。
+协议来源：[LONG Hub Catalog Sync](https://docs.longhub.top/catalog-sync.html)、[Webhook](https://docs.longhub.top/webhook.html)、[AstrBot Plugin Views](https://docs.astrbot.app/en/dev/star/guides/plugin-pages.html)、[AstrBot 原生 FAISS 实现](https://github.com/AstrBotDevs/AstrBot/blob/master/astrbot/core/db/vec_db/faiss_impl/vec_db.py)。参考 [smart_imagechat_hub](https://github.com/QingchenWait/astrbot_plugin_smart_imagechat_hub) 和 [meme_manager](https://github.com/anka-afk/astrbot_plugin_meme_manager) 的集成与管理交互，本插件独立实现。
