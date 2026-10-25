@@ -5,6 +5,7 @@ import importlib.util
 import json
 import logging
 import sys
+from contextvars import ContextVar
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock
@@ -35,6 +36,20 @@ def plugin_module(monkeypatch, tmp_path):
         def fromBytes(data):
             return SimpleNamespace(data=data)
 
+    class Plain:
+        def __init__(self, text):
+            self.text = text
+
+    class At:
+        pass
+
+    class Reply:
+        pass
+
+    class MessageChain:
+        def __init__(self, chain=None):
+            self.chain = list(chain or [])
+
     class Config(dict):
         async def save_config_async(self, values):
             self.update(values)
@@ -50,11 +65,17 @@ def plugin_module(monkeypatch, tmp_path):
     module(
         "astrbot.api.event",
         AstrMessageEvent=object,
-        MessageChain=list,
-        filter=SimpleNamespace(on_llm_request=decorator, llm_tool=decorator),
+        MessageChain=MessageChain,
+        filter=SimpleNamespace(
+            on_llm_request=decorator,
+            llm_tool=decorator,
+            on_agent_begin=decorator,
+            on_agent_done=decorator,
+            after_message_sent=decorator,
+        ),
     )
-    module("astrbot.api.message_components", Image=Image)
-    module("astrbot.api.provider", ProviderRequest=object)
+    module("astrbot.api.message_components", Image=Image, Plain=Plain, At=At, Reply=Reply)
+    module("astrbot.api.provider", ProviderRequest=object, LLMResponse=object)
     module("astrbot.api.star", Context=object, Star=Star, register=decorator)
     module(
         "astrbot.api.web",
@@ -63,6 +84,11 @@ def plugin_module(monkeypatch, tmp_path):
         error_response=lambda message, status_code=400: {"error": message, "code": status_code},
     )
     module("astrbot.core")
+    module("astrbot.core.platform")
+    module(
+        "astrbot.core.platform.astr_message_event",
+        streaming_response_event=ContextVar("test_streaming_response_event", default=None),
+    )
     module("astrbot.core.utils")
     module("astrbot.core.utils.astrbot_path", get_astrbot_plugin_data_path=lambda: str(tmp_path))
     root = Path(__file__).parents[1]
@@ -82,6 +108,7 @@ class Event:
         self.message_str = "确实"
         self.extra = {}
         self.sent = []
+        self.stopped = False
 
     def get_extra(self, key, default=None):
         return self.extra.get(key, default)
@@ -89,9 +116,16 @@ class Event:
     def set_extra(self, key, value):
         self.extra[key] = value
 
+    def is_stopped(self):
+        return self.stopped
+
     async def send(self, message):
         await asyncio.sleep(0)
         self.sent.append(message)
+
+    async def send_streaming(self, stream, *args, **kwargs):
+        async for message in stream:
+            await self.send(message)
 
 
 @pytest.fixture
@@ -203,3 +237,267 @@ async def test_model_sdk_errors_do_not_expose_keys_or_image_payload(plugin):
         )
     assert "sk-private-key" not in str(raised.value)
     assert "base64-image" not in str(raised.value)
+
+
+def llm_response(text="回答正文", chain=None, role="assistant"):
+    return SimpleNamespace(role=role, completion_text=text, result_chain=chain)
+
+
+def delivered_parts(event):
+    return [getattr(comp, "text", "image") for message in event.sent for comp in message.chain]
+
+
+async def test_explicit_before_sends_image_before_text(plugin, plugin_module, db, image):
+    await publish(db, [image()])
+    event = Event()
+    assert await plugin.send_longhub_meme(event, "1", position="before") == "表情已发送。"
+    await event.send(plugin_module.MessageChain([plugin_module.Plain("回答正文")]))
+    await plugin.send_meme_after_reply(event)
+    assert delivered_parts(event) == ["image", "回答正文"]
+
+
+async def test_after_waits_for_final_response_and_all_text_segments(
+    plugin, plugin_module, db, image
+):
+    await publish(db, [image()])
+    event = Event()
+    result = await plugin.send_longhub_meme(event, "1", position="after")
+    assert "已安排" in result and not event.sent
+    plugin.service.client.image_bytes.assert_not_awaited()
+    assert not event.get_extra("longhub_sent")
+    assert event.unified_msg_origin not in plugin.recent
+    await event.send(plugin_module.MessageChain([plugin_module.Plain("中间说明")]))
+    await plugin.send_meme_after_reply(event)
+    assert delivered_parts(event) == ["中间说明"]
+    await plugin.complete_meme_order(event, None, llm_response())
+    await event.send(plugin_module.MessageChain([plugin_module.Plain("第一段")]))
+    await event.send(plugin_module.MessageChain([plugin_module.Plain("第二段")]))
+    await plugin.send_meme_after_reply(event)
+    await plugin.send_meme_after_reply(event)
+    assert delivered_parts(event) == ["中间说明", "第一段", "第二段", "image"]
+    assert plugin.recent[event.unified_msg_origin] == ["1"]
+    plugin.service.client.image_bytes.assert_awaited_once()
+
+
+async def test_after_stream_waits_for_adapter_buffer_flush(plugin, plugin_module, db, image):
+    await publish(db, [image()])
+    event = Event()
+    context = object()
+
+    async def buffered_adapter(stream):
+        messages = [message async for message in stream]
+        # Agent is already done, but the adapter has not delivered its buffered text yet.
+        assert event.get_extra("longhub_agent_done") and not event.sent
+        plugin.service.client.image_bytes.assert_not_awaited()
+        for message in messages:
+            await event.send(message)
+
+    event.send_streaming = buffered_adapter
+    await plugin.prepare_meme_order(event, context)
+    wrapped = event.send_streaming
+    await plugin.prepare_meme_order(event, context)
+    assert event.send_streaming is wrapped
+
+    async def fetch(url):
+        assert plugin_module.streaming_response_event.get() is None
+        return b"GIF89a-test"
+
+    plugin.service.client.image_bytes.side_effect = fetch
+
+    async def stream():
+        await plugin.send_longhub_meme(event, "1", position="after")
+        yield plugin_module.MessageChain([plugin_module.Plain("第一段")])
+        await plugin.complete_meme_order(event, context, llm_response())
+        await plugin.send_meme_after_reply(event)
+        yield plugin_module.MessageChain([plugin_module.Plain("第二段")])
+
+    token = plugin_module.streaming_response_event.set(event)
+    try:
+        await event.send_streaming(stream())
+        assert plugin_module.streaming_response_event.get() is event
+    finally:
+        plugin_module.streaming_response_event.reset(token)
+    await plugin.send_meme_after_reply(event)
+    assert delivered_parts(event) == ["第一段", "第二段", "image"]
+
+
+@pytest.mark.parametrize("text", ["", " \n "])
+async def test_after_empty_nonstreaming_reply_uses_final_image_chain(
+    plugin, plugin_module, db, image, text
+):
+    await publish(db, [image()])
+    event = Event()
+    await plugin.send_longhub_meme(event, "1", position="after")
+    response = llm_response(text=text)
+    await plugin.complete_meme_order(event, None, response)
+    assert not event.sent and response.result_chain
+    # Simulate the framework flushing buffered intermediate text before the final image.
+    await event.send(plugin_module.MessageChain([plugin_module.Plain("缓冲中的文字")]))
+    await event.send(response.result_chain)
+    await plugin.send_meme_after_reply(event)
+    assert delivered_parts(event) == ["缓冲中的文字", "image"]
+    plugin.service.client.image_bytes.assert_awaited_once()
+
+
+async def test_after_empty_stream_still_delivers_image(plugin, db, image):
+    await publish(db, [image()])
+    event = Event()
+    context = object()
+    await plugin.prepare_meme_order(event, context)
+
+    async def stream():
+        await plugin.send_longhub_meme(event, "1", position="after")
+        await plugin.complete_meme_order(event, context, llm_response(text=""))
+        if False:
+            yield
+
+    await event.send_streaming(stream())
+    assert delivered_parts(event) == ["image"]
+
+
+async def test_queued_after_reserves_turn_across_both_positions(plugin, db, image):
+    await publish(db, [image()])
+    event = Event()
+    results = await asyncio.gather(
+        plugin.send_longhub_meme(event, "1", position="after"),
+        plugin.send_longhub_meme(event, "1", position="before"),
+    )
+    assert all("安排" in result for result in results) and not event.sent
+    await plugin.complete_meme_order(event, None, llm_response())
+    await plugin.send_meme_after_reply(event)
+    assert delivered_parts(event) == ["image"]
+
+
+async def test_invalid_position_does_not_reserve_or_send(plugin, db, image):
+    await publish(db, [image()])
+    event = Event()
+    result = await plugin.send_longhub_meme(event, "1", position="middle")
+    assert "before 或 after" in result
+    assert event.get_extra("longhub_pending_after") is None and not event.sent
+    plugin.service.client.image_bytes.assert_not_awaited()
+
+
+async def test_after_revalidates_disabled_item_at_delivery(plugin, db, image):
+    await publish(db, [image()])
+    event = Event()
+    await plugin.send_longhub_meme(event, "1", position="after")
+    await db.update_override(1, {"enabled": False})
+    await plugin.complete_meme_order(event, None, llm_response())
+    await plugin.send_meme_after_reply(event)
+    assert not event.sent and event.get_extra("longhub_pending_after") is None
+    plugin.service.client.image_bytes.assert_not_awaited()
+
+
+async def test_after_delivery_failure_is_not_retried_by_duplicate_hooks(plugin, db, image):
+    await publish(db, [image()])
+    event = Event()
+    await plugin.send_longhub_meme(event, "1", position="after")
+    plugin.service.client.image_bytes.side_effect = OSError("R2 unavailable")
+    await plugin.complete_meme_order(event, None, llm_response())
+    await plugin.send_meme_after_reply(event)
+    await plugin.send_meme_after_reply(event)
+    assert not event.sent and not event.get_extra("longhub_sent")
+    plugin.service.client.image_bytes.assert_awaited_once()
+
+
+async def test_cancelled_stream_drops_queued_image(plugin, db, image):
+    await publish(db, [image()])
+    event = Event()
+    await plugin.prepare_meme_order(event, object())
+
+    async def stream():
+        await plugin.send_longhub_meme(event, "1", position="after")
+        raise asyncio.CancelledError()
+        yield
+
+    with pytest.raises(asyncio.CancelledError):
+        await event.send_streaming(stream())
+    assert event.get_extra("longhub_pending_after") is None and not event.sent
+
+
+@pytest.mark.parametrize("flag", ["agent_user_aborted", "agent_stop_requested", "stopped"])
+async def test_cancelled_reply_does_not_send_deferred_image(plugin, db, image, flag):
+    await publish(db, [image()])
+    event = Event()
+    await plugin.send_longhub_meme(event, "1", position="after")
+    if flag == "stopped":
+        event.stopped = True
+    else:
+        event.set_extra(flag, True)
+    await plugin.complete_meme_order(event, None, llm_response())
+    await plugin.send_meme_after_reply(event)
+    assert not event.sent and event.get_extra("longhub_pending_after") is None
+
+
+async def test_error_reply_drops_deferred_image(plugin, db, image):
+    await publish(db, [image()])
+    event = Event()
+    await plugin.send_longhub_meme(event, "1", position="after")
+    await plugin.complete_meme_order(event, None, llm_response(role="err"))
+    await plugin.send_meme_after_reply(event)
+    assert not event.sent and event.get_extra("longhub_pending_after") is None
+
+
+async def test_nested_agent_completion_does_not_release_root_reply_image(plugin, db, image):
+    await publish(db, [image()])
+    event = Event()
+    root, child = object(), object()
+    await plugin.prepare_meme_order(event, root)
+    await plugin.prepare_meme_order(event, child)
+    await plugin.send_longhub_meme(event, "1", position="after")
+    await plugin.complete_meme_order(event, child, llm_response())
+    await plugin.send_meme_after_reply(event)
+    assert not event.sent and not event.get_extra("longhub_agent_done")
+    await plugin.complete_meme_order(event, root, llm_response())
+    await plugin.send_meme_after_reply(event)
+    assert delivered_parts(event) == ["image"]
+
+
+@pytest.mark.parametrize("mode", ["before", "after", "empty_after"])
+async def test_cancellation_during_image_fetch_prevents_delivery(plugin, db, image, mode):
+    await publish(db, [image()])
+    event = Event()
+
+    async def fetch(url):
+        event.set_extra("agent_stop_requested", True)
+        return b"GIF89a-test"
+
+    plugin.service.client.image_bytes.side_effect = fetch
+    if mode == "before":
+        result = await plugin.send_longhub_meme(event, "1", position="before")
+        assert "已取消" in result
+    else:
+        await plugin.send_longhub_meme(event, "1", position="after")
+        response = llm_response(text="" if mode == "empty_after" else "回答正文")
+        await plugin.complete_meme_order(event, None, response)
+        await plugin.send_meme_after_reply(event)
+        assert response.result_chain is None
+    assert not event.sent and not event.get_extra("longhub_sent")
+
+
+async def test_after_reply_already_delivered_by_messaging_tool_uses_image_only_result(
+    plugin, plugin_module, db, image
+):
+    await publish(db, [image()])
+    event = Event()
+    await plugin.send_longhub_meme(event, "1", position="after")
+    await event.send(plugin_module.MessageChain([plugin_module.Plain("回答正文")]))
+    event.set_extra("_send_message_to_user_current_session_plain_texts", ["回答正文"])
+    response = llm_response()
+    await plugin.complete_meme_order(event, None, response)
+    await event.send(response.result_chain)
+    await plugin.send_meme_after_reply(event)
+    assert delivered_parts(event) == ["回答正文", "image"]
+
+
+async def test_after_empty_explicit_result_chain_takes_precedence_over_completion_text(
+    plugin, plugin_module, db, image
+):
+    await publish(db, [image()])
+    event = Event()
+    await plugin.send_longhub_meme(event, "1", position="after")
+    response = llm_response(text="框架不会发送的文字", chain=plugin_module.MessageChain())
+    await plugin.complete_meme_order(event, None, response)
+    await event.send(response.result_chain)
+    await plugin.send_meme_after_reply(event)
+    assert delivered_parts(event) == ["image"]
