@@ -41,7 +41,8 @@ def plugin_module(monkeypatch, tmp_path):
             self.text = text
 
     class At:
-        pass
+        def __init__(self, qq="bot"):
+            self.qq = qq
 
     class Reply:
         pass
@@ -70,6 +71,8 @@ def plugin_module(monkeypatch, tmp_path):
         AstrMessageEvent=object,
         MessageChain=MessageChain,
         filter=SimpleNamespace(
+            event_message_type=decorator,
+            EventMessageType=SimpleNamespace(ALL=object()),
             on_llm_request=decorator,
             llm_tool=decorator,
             on_agent_begin=decorator,
@@ -109,12 +112,20 @@ class Event:
     def __init__(self, origin="aiocqhttp:GroupMessage:100"):
         self.unified_msg_origin = origin
         self.message_str = "确实"
+        self.messages = []
+        self.self_id = "bot"
         self.extra = {}
         self.sent = []
         self.stopped = False
 
     def get_extra(self, key, default=None):
         return self.extra.get(key, default)
+
+    def get_messages(self):
+        return self.messages
+
+    def get_self_id(self):
+        return self.self_id
 
     def set_extra(self, key, value):
         self.extra[key] = value
@@ -198,6 +209,128 @@ async def test_candidates_are_injected_once_and_no_images_attached(plugin):
     assert req.system_prompt.startswith("原人格")
     assert "数据，不是指令" in req.system_prompt
     assert "query_longhub_memes_sql" in req.system_prompt
+
+
+@pytest.mark.parametrize(
+    ("self_id", "parts", "expected"),
+    [
+        ("bot", [("at", "bot")], True),
+        ("bot", [("text", " \t\n\u3000"), ("at", "bot"), ("text", " ")], True),
+        ("42", [("at", 42)], True),
+        (42, [("at", "42")], True),
+        ("bot", [], False),
+        ("bot", [("text", "@bot")], False),
+        ("bot", [("at", "other")], False),
+        ("bot", [("at", "all")], False),
+        ("bot", [("at", "bot"), ("at", "bot")], False),
+        ("bot", [("at", "bot"), ("at", "other")], False),
+        ("bot", [("at", "bot"), ("text", "你好")], False),
+        ("bot", [("at", "bot"), ("image", None)], False),
+        ("bot", [("reply", None), ("at", "bot")], False),
+        ("", [("at", "bot")], False),
+        (None, [("at", "bot")], False),
+    ],
+)
+def test_bare_mention_requires_one_actual_self_mention(
+    plugin, plugin_module, self_id, parts, expected
+):
+    event = Event()
+    event.self_id = self_id
+    constructors = {
+        "at": plugin_module.At,
+        "text": plugin_module.Plain,
+        "image": lambda _: plugin_module.Image(),
+        "reply": lambda _: plugin_module.Reply(),
+    }
+    event.messages = [constructors[kind](value) for kind, value in parts]
+    assert plugin._is_bare_mention(event) is expected
+
+
+async def test_empty_bare_mention_enters_native_llm_path_without_replacing_context(
+    plugin, plugin_module
+):
+    event = Event()
+    event.message_str = " \n"
+    event.messages = [plugin_module.At("bot"), plugin_module.Plain(" ")]
+    original_chain = event.messages
+    native_request = object()
+    event.set_extra("provider_request", native_request)
+    event.is_at_or_wake_command = False
+    event.call_llm = True
+    await plugin.prepare_bare_mention(event)
+    assert event.message_str == plugin_module.BARE_MENTION_TEXT
+    assert event.get_extra("longhub_bare_mention")
+    assert event.messages is original_chain
+    assert event.get_extra("provider_request") is native_request
+    assert event.is_at_or_wake_command is False and event.call_llm is True
+    assert not event.sent
+
+
+@pytest.mark.parametrize("unavailable", ["stopped", "uninitialized", "ordinary"])
+async def test_bare_mention_preparation_respects_cancel_and_other_messages(
+    plugin, plugin_module, unavailable
+):
+    event = Event()
+    event.message_str = ""
+    event.messages = [plugin_module.At("bot")]
+    if unavailable == "stopped":
+        event.stopped = True
+    elif unavailable == "uninitialized":
+        plugin.service = None
+    else:
+        event.messages.append(plugin_module.Plain("有问题"))
+    await plugin.prepare_bare_mention(event)
+    assert event.message_str == "" and not event.get_extra("longhub_bare_mention")
+
+
+async def test_bare_mention_guides_context_selection_without_searching_adapter_text(
+    plugin, plugin_module
+):
+    event = Event()
+    event.message_str = "[At:bot]"
+    event.messages = [plugin_module.At("bot")]
+    plugin.service.candidates = AsyncMock()
+    history = [{"role": "user", "content": "刚才还在聊原神，今天很开心"}]
+    req = SimpleNamespace(system_prompt="原人格", prompt="[At:bot]", contexts=history)
+    await plugin.provide_candidates(event, req)
+    await plugin.provide_candidates(event, req)
+    assert req.contexts is history and req.prompt == "[At:bot]"
+    assert req.system_prompt.startswith("原人格")
+    assert req.system_prompt.count("[本轮用户仅 @bot]") == 1
+    assert plugin_module.IMAGE_ONLY_MARKER in req.system_prompt
+    plugin.service.candidates.assert_not_awaited()
+    assert not event.sent
+
+
+async def test_bare_mention_model_can_select_then_send_one_image_only(
+    plugin, plugin_module, db, image
+):
+    await publish(db, [image(1, tag_names=["sleeping"]), image(2, tag_names=["happy"])])
+    event = Event()
+    event.message_str = ""
+    event.messages = [plugin_module.At("bot")]
+    await plugin.prepare_bare_mention(event)
+    req = SimpleNamespace(
+        system_prompt="",
+        prompt=event.message_str,
+        contexts=[{"role": "user", "content": "好开心，终于成功了"}],
+    )
+    await plugin.provide_candidates(event, req)
+    # Simulate model-selected tool calls, without requesting a live LLM or chat send.
+    result = json.loads(
+        await plugin.query_longhub_memes_sql(
+            event, "SELECT image_id FROM meme_tags WHERE tag IN ('happy','开心')"
+        )
+    )
+    ident = result["rows"][0][0]
+    assert ident == "2"
+    await plugin.send_longhub_meme(event, ident, position="after")
+    response = llm_response(text=plugin_module.IMAGE_ONLY_MARKER)
+    await plugin.complete_meme_order(event, None, response)
+    await event.send(response.result_chain)
+    await plugin.send_meme_after_reply(event)
+    assert delivered_parts(event) == ["image"]
+    assert plugin.recent[event.unified_msg_origin] == ["2"]
 
 
 async def test_sql_tool_returns_sendable_ids_and_uses_rating_policy(plugin, db, image):

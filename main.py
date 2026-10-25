@@ -22,9 +22,10 @@ from .backend.service import Service
 
 PLUGIN_NAME = "longhub"
 IMAGE_ONLY_MARKER = "[LONGHUB_IMAGE_ONLY]"
+BARE_MENTION_TEXT = "（用户仅 @ 了机器人，没有附带文字。）"
 
 
-@register(PLUGIN_NAME, "MoveToEx", "LONG Hub 同步表情目录", "0.2.1")
+@register(PLUGIN_NAME, "MoveToEx", "LONG Hub 同步表情目录", "0.2.2")
 class LongHubPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -110,6 +111,32 @@ class LongHubPlugin(Star):
         if len(self.recent) > 512:
             self.recent.popitem(last=False)
         return self.recent[key]
+
+    @staticmethod
+    def _is_bare_mention(event):
+        self_id = event.get_self_id()
+        if not self_id or str(self_id) == "all":
+            return False
+        mentions = 0
+        for component in event.get_messages():
+            if isinstance(component, At):
+                if str(component.qq) != str(self_id):
+                    return False
+                mentions += 1
+            elif not isinstance(component, Plain) or component.text.strip():
+                return False
+        return mentions == 1
+
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def prepare_bare_mention(self, event: AstrMessageEvent):
+        if not self.service or self._reply_cancelled(event) or not self._is_bare_mention(event):
+            return
+        event.set_extra("longhub_bare_mention", True)
+        if not (event.message_str or "").strip():
+            # The native agent skips empty text before on_llm_request. A faithful
+            # text representation lets its normal path load history/persona/tools
+            # while preserving the original message chain and wake/LLM settings.
+            event.message_str = BARE_MENTION_TEXT
 
     @staticmethod
     def _send_lock(event):
@@ -347,8 +374,17 @@ class LongHubPlugin(Star):
         if not self.service or event.get_extra("longhub_prompt_added"):
             return
         try:
-            candidates = await self.service.candidates(
-                event.message_str or "", recent=self._recent(event)
+            bare_mention = bool(event.get_extra("longhub_bare_mention")) or self._is_bare_mention(
+                event
+            )
+            # Mention IDs and adapter placeholders carry no search intent. Let the
+            # model use the conversation already supplied by AstrBot instead.
+            candidates = (
+                []
+                if bare_mention
+                else await self.service.candidates(
+                    event.message_str or "", recent=self._recent(event)
+                )
             )
             block = (
                 "\n[LONG Hub 表情工具]\n"
@@ -379,6 +415,19 @@ class LongHubPlugin(Star):
             )
             if candidates:
                 block += "\n当前候选：" + json.dumps(candidates, ensure_ascii=False)
+            if bare_mention:
+                block += (
+                    "\n[本轮用户仅 @bot]\n"
+                    "用户本轮只 @ 了你，没有附带问题或关键词。"
+                    "请根据已有会话上下文、最近话题和情绪，自主检索并选择一张合适的龙图作为回应。"
+                    "不要询问用户想聊什么、需要哪种表情，也不要把 @、机器人 ID 或提及占位符当作关键词。"
+                    "优先从上下文提取中英文标签及同义词，用 IN/OR 扩大检索范围；"
+                    "标签无合适结果再回落到上下文相关的文字搜索。"
+                    "上下文很少时，可选择自然的招呼、疑惑或等待回应等轻量反应。"
+                    "本轮以一张龙图完成回复：先调用 send_longhub_meme，再仅输出内部结束标记 "
+                    f"{IMAGE_ONLY_MARKER}，不附加配文或发送确认。"
+                    "如果没有可用图片、相关工具未开放或发送失败，不要编造图片 ID，也不要声称已经发送。"
+                )
             req.system_prompt = (req.system_prompt or "") + block
             event.set_extra("longhub_prompt_added", True)
         except Exception as exc:
