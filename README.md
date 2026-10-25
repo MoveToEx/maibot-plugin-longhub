@@ -11,7 +11,7 @@
 
 插件本身只持久化 SQLite 目录、人工修订、模型标注、任务和日志。R2 图片在需要时读入内存；调用 AstrBot 标准发送和视觉接口时，框架可能生成并清理临时图片。不执行图片上传或上游元数据修改。
 
-管理面板为 React + Vite + React Router + Tailwind CSS SPA，使用 [Base UI](https://base-ui.com/react/overview/quick-start) 提供弹窗、选择器、开关、复选框和按钮。支持桌面与手机布局，跟随 AstrBot 的亮色／暗色主题；目录筛选、分页和表情详情使用 Hash 路由，支持刷新与前进、后退。安装包已包含构建产物，部署时无需 Node.js 或前端构建步骤。
+管理面板为 React + Vite + React Router + Tailwind CSS SPA，使用 [Base UI](https://base-ui.com/react/overview/quick-start) 提供弹窗、选择器、开关、复选框和按钮。采用顶部导航，手机端可横向滚动，跟随 AstrBot 的亮色／暗色主题；目录筛选、分页和表情详情使用 Hash 路由，支持刷新与前进、后退。安装包已包含构建产物，部署时无需 Node.js 或前端构建步骤。
 
 ## 安装与首次配置
 

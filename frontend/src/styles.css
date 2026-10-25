@@ -91,51 +91,23 @@ pre {
 
 @layer components {
   .app-shell {
-    @apply min-h-screen grid;
-    grid-template-columns: 226px minmax(0, 1fr);
-  }
-  .sidebar {
-    @apply bg-surface border-r border-line flex flex-col sticky top-0 h-dvh px-4 py-7;
-  }
-  .brand {
-    @apply flex items-center gap-3 px-3 mb-11;
-  }
-  .brand-symbol {
-    @apply inline-flex items-center justify-center rounded-xl text-white shrink-0;
-    width: 39px;
-    height: 41px;
-    background: #7c66d9;
-    box-shadow: 0 4px 12px #7560d820;
-  }
-  .brand strong {
-    @apply block text-[18px] font-semibold tracking-tight;
-  }
-  .brand small {
-    @apply block text-[10px] text-muted mt-1 tracking-wider;
-  }
-  .nav-label {
-    @apply text-[10px] text-muted tracking-widest px-4 mb-3;
+    @apply min-h-screen;
   }
   .navigation {
-    @apply flex flex-col gap-1.5;
+    @apply flex items-stretch gap-1 min-w-0 overflow-x-auto;
+    scrollbar-width: none;
   }
   .nav-item {
-    @apply flex items-center gap-3 px-4 py-3 rounded-lg text-xs text-muted transition-colors;
+    @apply flex items-center gap-2 px-3 h-[68px] border-b-2 border-transparent text-xs text-muted transition-colors whitespace-nowrap shrink-0;
   }
   .nav-item:hover {
     @apply bg-soft text-ink;
   }
   .nav-item.active {
-    @apply bg-accent-soft text-accent font-medium;
+    @apply border-accent text-accent font-medium;
   }
   .nav-count {
-    @apply ml-auto rounded-md px-1.5 py-0.5 text-[10px] bg-accent-soft text-accent tabular-nums;
-  }
-  .sidebar-bottom {
-    @apply mt-auto pt-10;
-  }
-  .connection-card {
-    @apply bg-soft rounded-xl p-4 mx-1;
+    @apply rounded-md px-1.5 py-0.5 text-[10px] bg-accent-soft text-accent tabular-nums;
   }
   .status-dot {
     @apply inline-block w-1.5 h-1.5 rounded-full shrink-0;
@@ -145,17 +117,17 @@ pre {
     background: var(--app-success);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-success) 9%, transparent);
   }
-  .sidebar-help {
-    @apply flex items-center gap-2.5 text-[11px] text-muted mx-1 mt-4 px-3 py-2 rounded-lg hover:bg-soft hover:text-ink;
-  }
   .topbar {
-    @apply h-[68px] bg-surface border-b border-line flex items-center justify-between px-9;
+    @apply sticky top-0 z-20 bg-surface border-b border-line;
+  }
+  .topbar-inner {
+    @apply max-w-[1440px] mx-auto px-9 flex items-center justify-between gap-5;
+  }
+  .topbar-actions {
+    @apply flex items-center gap-4 shrink-0;
   }
   .topbar-status {
-    @apply flex items-center gap-1.5 text-[10px] text-muted;
-  }
-  .avatar {
-    @apply flex items-center justify-center size-7 rounded-full bg-accent-soft text-accent text-[9px] font-semibold;
+    @apply flex items-center gap-2 text-[10px] text-muted whitespace-nowrap;
   }
   .main-content {
     @apply max-w-[1440px] mx-auto px-9 pt-8 pb-5 outline-none;
@@ -604,20 +576,13 @@ pre {
 }
 
 @media (max-width: 1100px) {
-  .app-shell {
-    grid-template-columns: 200px minmax(0, 1fr);
-  }
   .main-content {
     padding-left: 24px;
     padding-right: 24px;
   }
-  .topbar {
+  .topbar-inner {
     padding-left: 24px;
     padding-right: 24px;
-  }
-  .brand {
-    padding-left: 6px;
-    gap: 9px;
   }
   .nav-item {
     padding-left: 12px;
@@ -625,54 +590,27 @@ pre {
   }
 }
 @media (max-width: 760px) {
-  .app-shell {
-    display: block;
+  .topbar-inner {
+    padding: 0 16px;
+    gap: 10px;
   }
-  .sidebar {
-    position: static;
-    height: auto;
-    border-right: 0;
-    border-bottom: 1px solid var(--app-line);
-    padding: 18px 16px 12px;
-  }
-  .brand {
-    margin-bottom: 18px;
-    padding-left: 4px;
-  }
-  .brand-symbol {
-    width: 33px;
-    height: 35px;
-  }
-  .brand strong {
-    font-size: 16px;
-  }
-  .brand small {
+  .nav-count,
+  .topbar-status #connection-state {
     display: none;
   }
-  .nav-label,
-  .sidebar-bottom,
-  .nav-count {
-    display: none;
-  }
-  .navigation {
-    flex-direction: row;
-    gap: 4px;
-    overflow-x: auto;
-    scrollbar-width: none;
+  .topbar-actions {
+    gap: 8px;
   }
   .nav-item {
-    flex: 0 0 auto;
     justify-content: center;
-    padding: 10px 12px;
+    height: 56px;
+    padding: 0 10px;
     font-size: 11px;
     gap: 7px;
   }
   .nav-item svg {
     width: 14px;
     height: 14px;
-  }
-  .topbar {
-    display: none;
   }
   .main-content {
     padding: 26px 16px 16px;

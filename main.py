@@ -24,7 +24,7 @@ PLUGIN_NAME = "longhub"
 IMAGE_ONLY_MARKER = "[LONGHUB_IMAGE_ONLY]"
 
 
-@register(PLUGIN_NAME, "MoveToEx", "LONG Hub 同步表情目录", "0.2.0")
+@register(PLUGIN_NAME, "MoveToEx", "LONG Hub 同步表情目录", "0.2.1")
 class LongHubPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)

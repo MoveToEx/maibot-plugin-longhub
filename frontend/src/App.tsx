@@ -1,9 +1,6 @@
 import {
-  Activity,
-  ArrowUpRight,
   CheckCircle2,
   CircleHelp,
-  FolderHeart,
   Images,
   LayoutDashboard,
   RefreshCw,
@@ -72,36 +69,26 @@ function Shell() {
       >
         跳至内容
       </a>
-      <aside className="sidebar">
-        <NavLink to="/overview" className="brand" aria-label="LONG Hub 首页">
-          <span className="brand-symbol">
-            <FolderHeart size={23} strokeWidth={1.8} />
-          </span>
-          <span>
-            <strong>LONG Hub</strong>
-            <small>让表情融入对话</small>
-          </span>
-        </NavLink>
-        <p className="nav-label">工作空间</p>
-        <nav className="navigation" aria-label="管理导航">
-          {navigation.map((item) => (
-            <NavLink
-              key={item.path}
-              to={`/${item.path}`}
-              data-tab={item.path}
-              className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
-            >
-              <item.icon size={18} strokeWidth={1.7} />
-              <span>{item.title}</span>
-              {item.path === 'tasks' && !!status?.tag_jobs.queued && (
-                <span className="nav-count">{status.tag_jobs.queued}</span>
-              )}
-            </NavLink>
-          ))}
-        </nav>
-        <div className="sidebar-bottom">
-          <div className="connection-card">
-            <div className="flex items-center gap-2 text-xs font-medium">
+      <header className="topbar">
+        <div className="topbar-inner">
+          <nav className="navigation" aria-label="管理导航">
+            {navigation.map((item) => (
+              <NavLink
+                key={item.path}
+                to={`/${item.path}`}
+                data-tab={item.path}
+                className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
+              >
+                <item.icon size={16} strokeWidth={1.7} />
+                <span>{item.title}</span>
+                {item.path === 'tasks' && !!status?.tag_jobs.queued && (
+                  <span className="nav-count">{status.tag_jobs.queued}</span>
+                )}
+              </NavLink>
+            ))}
+          </nav>
+          <div className="topbar-actions">
+            <span className="topbar-status">
               <span className={`status-dot ${connected ? 'online' : ''}`} />
               <span id="connection-state">
                 {!status
@@ -112,75 +99,51 @@ function Shell() {
                       ? '接收器异常'
                       : '等待首次配置'}
               </span>
-            </div>
-            <p className="text-muted text-[11px] leading-5 mt-2">
-              本地保存目录
-              <br />
-              图片按需从远程 R2 读取
-            </p>
+            </span>
+            <a
+              href="https://docs.longhub.top"
+              target="_blank"
+              rel="noreferrer"
+              className="icon-button"
+              aria-label="文档与帮助"
+              title="文档与帮助"
+            >
+              <CircleHelp size={16} />
+            </a>
           </div>
-          <a
-            href="https://docs.longhub.top"
-            target="_blank"
-            rel="noreferrer"
-            className="sidebar-help"
-          >
-            <CircleHelp size={16} />
-            文档与帮助
-            <ArrowUpRight size={13} className="ml-auto" />
-          </a>
-          <p className="text-[10px] text-muted px-3 mt-4 tracking-wider">LONG HUB / ASTRBOT</p>
         </div>
-      </aside>
-      <div className="workspace min-w-0">
-        <header className="topbar">
-          <div className="flex items-center gap-2 text-xs text-muted">
-            <span className="hidden sm:inline">工作空间</span>
-            <span className="hidden sm:inline text-line">/</span>
-            <span className="text-ink">{page.title}</span>
+      </header>
+      <main id="main-content" tabIndex={-1} className="main-content">
+        <div className="page-heading">
+          <div>
+            <p className="eyebrow">LONG HUB CONSOLE</p>
+            <h1>{page.title}</h1>
+            <p className="text-sm text-muted mt-2 leading-6">{page.subtitle}</p>
           </div>
-          <div className="flex items-center gap-4">
-            <span className="topbar-status">
-              <Activity size={13} />
-              <span>{connected ? '服务运行中' : '连接状态'}</span>
-            </span>
-            <span className="avatar" aria-label="LONG Hub">
-              LH
-            </span>
-          </div>
-        </header>
-        <main id="main-content" tabIndex={-1} className="main-content">
-          <div className="page-heading">
-            <div>
-              <p className="eyebrow">LONG HUB CONSOLE</p>
-              <h1>{page.title}</h1>
-              <p className="text-sm text-muted mt-2 leading-6">{page.subtitle}</p>
-            </div>
-            <Button id="refresh" onClick={refresh}>
-              <RefreshCw size={14} />
-              刷新
-            </Button>
-          </div>
-          {statusError && <ErrorState message={statusError} retry={refresh} />}
-          <Routes>
-            <Route path="/overview" element={<Overview />} />
-            <Route path="/catalog" element={<Catalog />}>
-              <Route path=":id" element={<MemeDetail />} />
-            </Route>
-            <Route path="/logs" element={<Logs />} />
-            <Route path="/tasks" element={<Tasks />} />
-            <Route path="/settings" element={<Settings />} />
-            <Route path="*" element={<Navigate to="/overview" replace />} />
-          </Routes>
-          <footer className="page-footer">
-            <span>LONG Hub 表情目录</span>
-            <span className="flex items-center gap-1.5">
-              <CheckCircle2 size={12} />
-              人工修订独立保留
-            </span>
-          </footer>
-        </main>
-      </div>
+          <Button id="refresh" onClick={refresh}>
+            <RefreshCw size={14} />
+            刷新
+          </Button>
+        </div>
+        {statusError && <ErrorState message={statusError} retry={refresh} />}
+        <Routes>
+          <Route path="/overview" element={<Overview />} />
+          <Route path="/catalog" element={<Catalog />}>
+            <Route path=":id" element={<MemeDetail />} />
+          </Route>
+          <Route path="/logs" element={<Logs />} />
+          <Route path="/tasks" element={<Tasks />} />
+          <Route path="/settings" element={<Settings />} />
+          <Route path="*" element={<Navigate to="/overview" replace />} />
+        </Routes>
+        <footer className="page-footer">
+          <span>LONG Hub 表情目录</span>
+          <span className="flex items-center gap-1.5">
+            <CheckCircle2 size={12} />
+            人工修订独立保留
+          </span>
+        </footer>
+      </main>
       {notice && (
         <div
           className={`notice ${notice.error ? 'notice-error' : ''}`}
@@ -210,9 +173,6 @@ export default function App() {
   if (ready.error)
     return (
       <div className="bootstrap">
-        <div className="brand-symbol mb-6">
-          <FolderHeart size={26} />
-        </div>
         <h1 className="text-xl font-semibold mb-4">LONG Hub 表情目录</h1>
         <ErrorState message={ready.error} retry={ready.reload} />
       </div>
