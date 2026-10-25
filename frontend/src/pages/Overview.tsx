@@ -270,7 +270,8 @@ export function Tasks() {
         )}
         <div className="panel-footer">
           <p className="text-xs text-muted leading-7 flex-1">
-            覆盖率严格超过 50% 且索引就绪后，优先开放语义工具。重建会重新调用嵌入模型。
+            覆盖率严格超过 50%
+            且索引就绪后开放语义工具，由模型根据检索意图选择使用。重建会重新调用嵌入模型。
           </p>
           <Button
             id="rebuild-semantic"

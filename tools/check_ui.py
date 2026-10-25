@@ -170,7 +170,9 @@ async def check():
                 )
                 ready_icon = page.get_by_role("button", name="语义查询可用", exact=True)
                 await ready_icon.hover()
-                await expect(page.get_by_role("tooltip")).to_contain_text("模型会优先按概念检索")
+                await expect(page.get_by_role("tooltip")).to_contain_text(
+                    "上下文明确相关时优先使用"
+                )
                 await page.keyboard.press("Escape")
                 await page.locator("#refresh").focus()
                 await page.screenshot(path=str(output / "overview.png"), full_page=True)
@@ -331,7 +333,9 @@ async def check():
                 await frame.locator('[data-tab="overview"]').click()
                 await expect(frame.locator("#annotation-chart canvas")).to_be_visible()
                 await frame.get_by_role("button", name="语义查询可用", exact=True).hover()
-                await expect(frame.get_by_role("tooltip")).to_contain_text("模型会优先按概念检索")
+                await expect(frame.get_by_role("tooltip")).to_contain_text(
+                    "上下文明确相关时优先使用"
+                )
                 assert not errors, errors
                 print(
                     "SPA checks passed: overview layout/pie/tooltip/updates/empty, routes/history/reload, filters/pagination, edits/int64/XSS, selections, retry, logs/tasks/settings, dark/mobile, sandbox iframe"

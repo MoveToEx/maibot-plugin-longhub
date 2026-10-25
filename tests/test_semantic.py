@@ -1,4 +1,5 @@
 import copy
+import logging
 import math
 from dataclasses import replace
 from types import SimpleNamespace
@@ -388,8 +389,11 @@ async def test_request_tool_gating_and_preference_are_local(plugin, plugin_modul
     if available:
         plugin.service.candidates.assert_not_awaited()
         assert "不要先拆成精确标签" in req.system_prompt
+        assert "只有聊天具有有意义的上下文" in req.system_prompt
     else:
         plugin.service.candidates.assert_awaited_once()
+    assert "ORDER BY RANDOM() LIMIT 1" in req.system_prompt
+    assert "不要擅自给明确的随机请求附加主题" in req.system_prompt
 
 
 async def test_tool_returns_candidates_without_sending_and_embedding_settings_validation(
@@ -406,3 +410,35 @@ async def test_tool_returns_candidates_without_sending_and_embedding_settings_va
     provider = Provider()
     plugin.context.get_provider_by_id = lambda _: provider
     assert plugin._embedding_provider("embedding") is provider
+
+
+async def test_semantic_tool_logs_original_error_chain_and_redacts_secrets(
+    plugin, plugin_module, db, image, tmp_path, caplog
+):
+    engine, provider, _ = await setup(db, image, tmp_path)
+    engine.settings = replace(engine.settings, app_key="hub-private", webhook_secret="hook-private")
+    provider.provider_config["key"] = ["sk-private", "rotated-private"]
+    provider.provider_config["headers"] = {"Authorization": "Bearer header-private"}
+    await engine.run_once()
+    plugin.service.semantic = engine
+    plugin.service.settings = engine.settings
+
+    class EmbeddingRequestError(RuntimeError):
+        status_code = 422
+
+    secrets = ["sk-private", "rotated-private", "hub-private", "hook-private", "header-private"]
+    provider.get_embedding = AsyncMock(
+        side_effect=EmbeddingRequestError("invalid embedding input dimension; " + " ".join(secrets))
+    )
+    with caplog.at_level(logging.ERROR, logger=plugin_module.logger.name):
+        result = await plugin.search_longhub_memes_semantic(Event(), "尴尬的回应")
+    assert "语义检索失败" in result and "invalid embedding input dimension" not in result
+    records = [record for record in caplog.records if record.name == plugin_module.logger.name]
+    assert len(records) == 1 and records[0].levelno == logging.ERROR
+    details = records[0].getMessage()
+    assert "语义检索失败" in details and "embedding" in details
+    assert "Traceback" in details and "EmbeddingRequestError" in details
+    assert "HTTP 422" in details and "invalid embedding input dimension" in details
+    assert "[REDACTED]" in details
+    assert all(secret not in details and secret not in result for secret in secrets)
+    await engine.close()

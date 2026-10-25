@@ -11,7 +11,7 @@ import uuid
 from pathlib import Path
 
 from .models import PROMPT_VERSION
-from .vector_store import Embeddings, NativeVectorStore, SemanticError, safe_error
+from .vector_store import Embeddings, NativeVectorStore, SemanticError, error_details, safe_error
 
 logger = logging.getLogger(__name__)
 DOCUMENT_VERSION = 1
@@ -345,7 +345,11 @@ class SemanticIndex:
                 raise
             except Exception as exc:
                 self.error = safe_error(exc)
-                logger.warning("LONG Hub: %s", self.error)
+                logger.error(
+                    "LONG Hub 语义索引更新失败：%s\n%s",
+                    self.error,
+                    error_details(exc, provider=self.provider, settings=self.settings),
+                )
                 failures += 1
                 delay = min(60, 2 ** min(failures, 6))
             self.wakeup.clear()

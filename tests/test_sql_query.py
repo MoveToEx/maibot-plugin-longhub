@@ -77,6 +77,25 @@ async def test_sql_with_join_aggregate_and_comments(db, image):
     assert result["columns"] == ["rating", "n"] and result["rows"] == [["none", 2]]
 
 
+async def test_sql_random_selection_respects_sendable_scope_and_optional_tags(db, image):
+    await publish(
+        db,
+        [image(1, tag_names=["开心"]), image(2), image(3, rating="violent"), image(4)],
+    )
+    await db.update_override(4, {"enabled": False})
+    staging = await db.new_generation()
+    await db.stage_batch(staging, [image(99)])
+    result = await db.query_sql("SELECT id FROM memes ORDER BY RANDOM() LIMIT 1", ratings=["none"])
+    assert len(result["rows"]) == 1 and result["rows"][0][0] in {"1", "2"}
+    result = await db.query_sql(
+        """SELECT m.id FROM memes m WHERE EXISTS (
+        SELECT 1 FROM meme_tags t WHERE t.image_id=m.id AND t.tag IN ('happy','开心'))
+        ORDER BY RANDOM() LIMIT 1""",
+        ratings=["none"],
+    )
+    assert result["rows"] == [["1"]]
+
+
 async def test_sql_reads_committed_changes_without_stale_cache(db, image):
     generation = await publish(db, [image(1)])
     assert (await db.query_sql("SELECT id FROM memes"))["rows"] == [["1"]]

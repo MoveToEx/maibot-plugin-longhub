@@ -83,7 +83,8 @@ export function AnnotationChart({ status }: { status: Status }) {
                 <Tooltip.Portal>
                   <Tooltip.Positioner side="bottom" align="end" sideOffset={8} className="z-50">
                     <Tooltip.Popup className="tooltip-popup" role="tooltip">
-                      语义查询可用。有效标注覆盖率已超过 50%，向量索引已就绪，模型会优先按概念检索。
+                      语义查询可用。有效标注覆盖率已超过
+                      50%，向量索引已就绪。上下文明确相关时优先使用，随机索图可直接用 SQL。
                     </Tooltip.Popup>
                   </Tooltip.Positioner>
                 </Tooltip.Portal>
