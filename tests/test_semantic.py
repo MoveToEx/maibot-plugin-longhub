@@ -392,8 +392,7 @@ async def test_request_tool_gating_and_preference_are_local(plugin, plugin_modul
         assert "只有聊天具有有意义的上下文" in req.system_prompt
     else:
         plugin.service.candidates.assert_awaited_once()
-    assert "ORDER BY RANDOM() LIMIT 1" in req.system_prompt
-    assert "不要擅自给明确的随机请求附加主题" in req.system_prompt
+    assert "RANDOM()" not in req.system_prompt and "随机" not in req.system_prompt
 
 
 async def test_tool_returns_candidates_without_sending_and_embedding_settings_validation(
