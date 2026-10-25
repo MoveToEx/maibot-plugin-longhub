@@ -50,6 +50,9 @@ def plugin_module(monkeypatch, tmp_path):
         def __init__(self, chain=None):
             self.chain = list(chain or [])
 
+        def derive(self, chain):
+            return MessageChain(chain)
+
     class Config(dict):
         async def save_config_async(self, values):
             self.update(values)
@@ -221,7 +224,7 @@ async def test_successful_send_not_reported_failed_when_tag_queue_fails(
     plugin.service.settings = Settings(vision_provider_id="vision")
     monkeypatch.setattr(db, "enqueue_tags", AsyncMock(side_effect=OSError("queue unavailable")))
     event = Event()
-    assert await plugin.send_longhub_meme(event, "1") == "表情已发送。"
+    assert (await plugin.send_longhub_meme(event, "1")).startswith("表情已发送。")
     assert len(event.sent) == 1 and event.get_extra("longhub_sent")
 
 
@@ -250,7 +253,9 @@ def delivered_parts(event):
 async def test_explicit_before_sends_image_before_text(plugin, plugin_module, db, image):
     await publish(db, [image()])
     event = Event()
-    assert await plugin.send_longhub_meme(event, "1", position="before") == "表情已发送。"
+    assert (await plugin.send_longhub_meme(event, "1", position="before")).startswith(
+        "表情已发送。"
+    )
     await event.send(plugin_module.MessageChain([plugin_module.Plain("回答正文")]))
     await plugin.send_meme_after_reply(event)
     assert delivered_parts(event) == ["image", "回答正文"]
@@ -339,20 +344,38 @@ async def test_after_empty_nonstreaming_reply_uses_final_image_chain(
     plugin.service.client.image_bytes.assert_awaited_once()
 
 
-async def test_after_empty_stream_still_delivers_image(plugin, db, image):
+@pytest.mark.parametrize("position", ["before", "after"])
+async def test_empty_stream_can_reply_with_one_image_only(plugin, db, image, position):
     await publish(db, [image()])
     event = Event()
     context = object()
     await plugin.prepare_meme_order(event, context)
 
     async def stream():
-        await plugin.send_longhub_meme(event, "1", position="after")
+        await plugin.send_longhub_meme(event, "1", position=position)
         await plugin.complete_meme_order(event, context, llm_response(text=""))
         if False:
             yield
 
     await event.send_streaming(stream())
     assert delivered_parts(event) == ["image"]
+    assert len(event.sent) == 1
+
+
+@pytest.mark.parametrize("position", ["before", "after"])
+async def test_empty_nonstreaming_reply_can_send_one_image_only(plugin, db, image, position):
+    await publish(db, [image()])
+    event = Event()
+    await plugin.send_longhub_meme(event, "1", position=position)
+    response = llm_response(text="")
+    await plugin.complete_meme_order(event, None, response)
+    if response.result_chain:
+        await event.send(response.result_chain)
+    await plugin.send_meme_after_reply(event)
+    assert delivered_parts(event) == ["image"]
+    assert len(event.sent) == 1
+    assert not response.completion_text
+    plugin.service.client.image_bytes.assert_awaited_once()
 
 
 async def test_queued_after_reserves_turn_across_both_positions(plugin, db, image):
@@ -500,4 +523,116 @@ async def test_after_empty_explicit_result_chain_takes_precedence_over_completio
     await plugin.complete_meme_order(event, None, response)
     await event.send(response.result_chain)
     await plugin.send_meme_after_reply(event)
+    assert delivered_parts(event) == ["image"]
+
+
+@pytest.mark.parametrize("position", ["before", "after"])
+@pytest.mark.parametrize("use_chain", [False, True])
+async def test_image_only_marker_hides_all_nonstreaming_text(
+    plugin, plugin_module, db, image, position, use_chain
+):
+    await publish(db, [image()])
+    event = Event()
+    await plugin.send_longhub_meme(event, "1", position=position)
+    marker_text = " \n" + plugin_module.IMAGE_ONLY_MARKER + "\n额外确认语"
+    response = llm_response(text=marker_text)
+    if use_chain:
+        response = llm_response(
+            text="", chain=plugin_module.MessageChain([plugin_module.Plain(marker_text)])
+        )
+    await plugin.complete_meme_order(event, None, response)
+    assert response.completion_text == ""
+    if response.result_chain:
+        await event.send(response.result_chain)
+    await plugin.send_meme_after_reply(event)
+    assert delivered_parts(event) == ["image"] and len(event.sent) == 1
+
+
+@pytest.mark.parametrize("position", ["before", "after"])
+async def test_image_only_marker_is_hidden_at_every_stream_chunk_boundary(
+    plugin, plugin_module, db, image, position
+):
+    await publish(db, [image()])
+    marker = plugin_module.IMAGE_ONLY_MARKER
+    for split in range(len(marker) + 1):
+        event = Event()
+        context = object()
+        await plugin.prepare_meme_order(event, context)
+
+        async def stream():
+            await plugin.send_longhub_meme(event, "1", position=position)
+            yield plugin_module.MessageChain([plugin_module.Plain(" \n" + marker[:split])])
+            yield plugin_module.MessageChain([plugin_module.Plain(marker[split:] + "\n")])
+            yield plugin_module.MessageChain([plugin_module.Plain("不应显示的确认语")])
+            await plugin.complete_meme_order(event, context, llm_response(text=marker))
+
+        await event.send_streaming(stream())
+        await plugin.send_meme_after_reply(event)
+        assert delivered_parts(event) == ["image"] and len(event.sent) == 1, split
+
+
+async def test_caption_stream_preserves_nonmarker_text(plugin, plugin_module, db, image):
+    await publish(db, [image()])
+    event = Event()
+    context = object()
+    await plugin.prepare_meme_order(event, context)
+
+    async def stream():
+        await plugin.send_longhub_meme(event, "1", position="before")
+        yield plugin_module.MessageChain([plugin_module.Plain("[")])
+        yield plugin_module.MessageChain([plugin_module.Plain("开心] 正常配文")])
+        await plugin.complete_meme_order(event, context, llm_response(text="[开心] 正常配文"))
+
+    await event.send_streaming(stream())
+    assert delivered_parts(event) == ["image", "[开心] 正常配文"]
+
+
+async def test_marker_is_not_a_control_token_without_a_meme_reply(plugin, plugin_module):
+    event = Event()
+    await plugin.prepare_meme_order(event, object())
+
+    async def stream():
+        yield plugin_module.MessageChain([plugin_module.Plain(plugin_module.IMAGE_ONLY_MARKER)])
+
+    await event.send_streaming(stream())
+    assert delivered_parts(event) == [plugin_module.IMAGE_ONLY_MARKER]
+
+
+@pytest.mark.parametrize("position", ["before", "after"])
+async def test_final_marker_response_drops_unflushed_partial_prefix(
+    plugin, plugin_module, db, image, position
+):
+    await publish(db, [image()])
+    event = Event()
+    context = object()
+    await plugin.prepare_meme_order(event, context)
+
+    async def stream():
+        await plugin.send_longhub_meme(event, "1", position=position)
+        yield plugin_module.MessageChain([plugin_module.Plain(plugin_module.IMAGE_ONLY_MARKER[:8])])
+        await plugin.complete_meme_order(
+            event, context, llm_response(text=plugin_module.IMAGE_ONLY_MARKER)
+        )
+
+    await event.send_streaming(stream())
+    assert delivered_parts(event) == ["image"]
+
+
+async def test_image_only_mode_drops_later_reasoning_text(plugin, plugin_module, db, image):
+    await publish(db, [image()])
+    event = Event()
+    context = object()
+    await plugin.prepare_meme_order(event, context)
+
+    async def stream():
+        await plugin.send_longhub_meme(event, "1", position="before")
+        yield plugin_module.MessageChain([plugin_module.Plain(plugin_module.IMAGE_ONLY_MARKER)])
+        reasoning = plugin_module.MessageChain([plugin_module.Plain("不应显示的文字")])
+        reasoning.type = "reasoning"
+        yield reasoning
+        await plugin.complete_meme_order(
+            event, context, llm_response(text=plugin_module.IMAGE_ONLY_MARKER)
+        )
+
+    await event.send_streaming(stream())
     assert delivered_parts(event) == ["image"]
