@@ -6,7 +6,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 RATINGS = ("none", "moderate", "violent")
-PROMPT_VERSION = 1
+PROMPT_VERSION = 2
 MAX_ID = 2**63 - 1
 
 

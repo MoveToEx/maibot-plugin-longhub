@@ -83,7 +83,7 @@ class HubClient:
             auto_decompress=False,
             trust_env=False,
             cookie_jar=aiohttp.DummyCookieJar(),
-            headers={"User-Agent": "astrbot-plugin-longhub/0.1.4"},
+            headers={"User-Agent": "astrbot-plugin-longhub/0.1.5"},
         )
 
     async def close(self):

@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 from PIL import Image
 
-from backend.models import Settings
+from backend.models import PROMPT_VERSION, Settings
 from backend.tagging import Tagger, model_image, parse_annotation
 from tests.conftest import publish
 
@@ -71,6 +71,30 @@ async def test_pausing_and_duplicate_queue(db, image):
     assert await db.claim_tag() is None
     await db.set_meta("tagging_paused", False)
     assert await db.claim_tag()
+
+
+async def test_old_prompt_annotations_can_be_refreshed_without_losing_manual_edits(db, image):
+    await publish(db, [image(tag_names=["genshin_impact"])])
+    await db.update_override(1, {"manual_tags": ["人工"], "description": "人工描述"})
+    await db.conn.execute(
+        "INSERT INTO annotations VALUES(?,?,?,?,?,?,?,?)",
+        (1, "1.gif", "确实", "vision", PROMPT_VERSION - 1, "旧描述", '["旧标签"]', 0),
+    )
+    await db.conn.commit()
+    item = await db.get_image(1)
+    assert not item["annotation_fresh"] and "旧标签" in item["effective_tags"]
+    assert await db.missing_annotation_ids() == [1]
+    assert (await db.query_sql("SELECT annotation_fresh FROM memes"))["rows"] == [[0]]
+    assert await db.enqueue_tags([1], provider_id="vision") == 1
+    client = AsyncMock()
+    client.image_bytes.return_value = png_bytes()
+    generate = AsyncMock(return_value='{"description":"带龙脸的角色","tags":["龙脸","开心"]}')
+    tagger = Tagger(db, client, Settings(vision_provider_id="vision"), generate)
+    assert await tagger.run_once()
+    item = await db.get_image(1)
+    assert item["annotation_fresh"] and item["description"] == "人工描述"
+    assert set(item["effective_tags"]) == {"genshin_impact", "龙脸", "开心", "人工"}
+    assert (await db.query_sql("SELECT annotation_fresh FROM memes"))["rows"] == [[1]]
 
 
 async def test_metadata_change_during_model_call_requeues(db, image):
