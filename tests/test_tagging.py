@@ -7,7 +7,7 @@ import pytest
 from PIL import Image
 
 from backend.models import PROMPT_VERSION, Settings
-from backend.tagging import Tagger, model_image, parse_annotation
+from backend.tagging import TAG_PROMPT, Tagger, model_image, parse_annotation
 from tests.conftest import publish
 
 
@@ -17,14 +17,52 @@ def png_bytes():
     return buffer.getvalue()
 
 
-def test_gif_montage_is_in_memory():
-    frames = [Image.new("RGB", (20, 20), color) for color in ["red", "green", "blue", "yellow"]]
+def gif_bytes(frame_count=4):
+    colors = ["red", "green", "blue", "yellow", "purple", "orange", "black"]
+    frames = [Image.new("RGB", (20, 20), color) for color in colors[:frame_count]]
     buffer = io.BytesIO()
     frames[0].save(buffer, "GIF", save_all=True, append_images=frames[1:], duration=100, loop=0)
-    data_url = model_image(buffer.getvalue())
+    return buffer.getvalue()
+
+
+@pytest.mark.parametrize("frame_count", [1, 2, 3, 4, 7])
+def test_gif_montage_is_in_memory(frame_count):
+    data_url, sampled_frames = model_image(gif_bytes(frame_count))
+    assert sampled_frames == min(frame_count, 4)
     with Image.open(io.BytesIO(base64.b64decode(data_url.split(",", 1)[1]))) as result:
-        assert result.size == (1024, 1024) and result.format == "JPEG"
+        assert result.size == ((1024, 1024) if frame_count > 1 else (20, 20))
+        assert result.format == "JPEG"
         assert result.getpixel((5, 5))[0] > 200
+        if 1 < frame_count < 4:
+            assert all(channel > 240 for channel in result.getpixel((600, 600)))
+
+
+@pytest.mark.parametrize("frame_count", [1, 2, 3, 4, 7])
+async def test_animation_prompt_matches_actual_preview(db, image, frame_count):
+    item = image()
+    # Determine animation from decoded bytes, even if the filename is misleading.
+    item["imageUrl"] = "https://r2.longhub.top/1.png"
+    item["imageKey"] = "1.png"
+    await publish(db, [item])
+    await db.enqueue_tags([1], provider_id="vision")
+    client = AsyncMock()
+    client.image_bytes.return_value = gif_bytes(frame_count)
+    generate = AsyncMock(return_value='{"description":"带龙脸的角色点头","tags":["龙脸","赞同"]}')
+    tagger = Tagger(db, client, Settings(vision_provider_id="vision"), generate)
+
+    assert await tagger.run_once()
+    call = generate.call_args.kwargs
+    assert call["system_prompt"].startswith(TAG_PROMPT)
+    assert call["prompt"] == '图片中已确认的文字（JSON 字符串）："确实"'
+    if frame_count == 1:
+        assert call["system_prompt"] == TAG_PROMPT
+    else:
+        assert f"{min(frame_count, 4)} 帧" in call["system_prompt"]
+        assert "从左到右、从上到下" in call["system_prompt"]
+        assert "不足四帧的位置是补白" in call["system_prompt"]
+        assert "对整张动图给出一份描述和标签" in call["system_prompt"]
+        assert "不要把预览的" in call["system_prompt"]
+    assert (await db.get_image(1))["annotation_fresh"]
 
 
 @pytest.mark.parametrize(
@@ -58,6 +96,7 @@ async def test_tagging_runs_without_image_files(db, image, tmp_path):
     assert item["annotation_fresh"] and item["description"] == "人工描述"
     assert "手工" in item["effective_tags"] and "开心" in item["effective_tags"]
     assert generate.call_args.kwargs["image_url"].startswith("data:image/jpeg;base64,")
+    assert generate.call_args.kwargs["system_prompt"] == TAG_PROMPT
     assert not any(
         p.suffix.lower() in [".jpg", ".png", ".gif", ".webp"] for p in tmp_path.rglob("*")
     )

@@ -31,7 +31,7 @@ CONTEXT_MEME_PROMPT = "请根据当前会话上下文、最近话题和情绪，
 SEMANTIC_TOOL = "search_longhub_memes_semantic"
 
 
-@register(PLUGIN_NAME, "MoveToEx", "LONG Hub 同步表情目录", "0.4.2")
+@register(PLUGIN_NAME, "MoveToEx", "LONG Hub 同步表情目录", "0.4.3")
 class LongHubPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
