@@ -27,11 +27,11 @@ from .backend.vector_store import safe_error as semantic_error
 
 PLUGIN_NAME = "longhub"
 IMAGE_ONLY_MARKER = "[LONGHUB_IMAGE_ONLY]"
-BARE_MENTION_TEXT = "（用户仅 @ 了机器人，没有附带文字。）"
+CONTEXT_MEME_PROMPT = "请根据当前会话上下文、最近话题和情绪，检索并发送一张合适的龙图，以纯图回复。"
 SEMANTIC_TOOL = "search_longhub_memes_semantic"
 
 
-@register(PLUGIN_NAME, "MoveToEx", "LONG Hub 同步表情目录", "0.4.1")
+@register(PLUGIN_NAME, "MoveToEx", "LONG Hub 同步表情目录", "0.4.2")
 class LongHubPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -151,31 +151,41 @@ class LongHubPlugin(Star):
             self.recent.popitem(last=False)
         return self.recent[key]
 
-    @staticmethod
-    def _is_bare_mention(event):
-        self_id = event.get_self_id()
-        if not self_id or str(self_id) == "all":
-            return False
-        mentions = 0
-        for component in event.get_messages():
-            if isinstance(component, At):
-                if str(component.qq) != str(self_id):
-                    return False
-                mentions += 1
-            elif not isinstance(component, Plain) or component.text.strip():
-                return False
-        return mentions == 1
-
-    @filter.event_message_type(filter.EventMessageType.ALL)
-    async def prepare_bare_mention(self, event: AstrMessageEvent):
-        if not self.service or self._reply_cancelled(event) or not self._is_bare_mention(event):
+    @filter.command("l")
+    async def context_meme(self, event: AstrMessageEvent):
+        """根据当前会话上下文选取一张合适的龙图，以纯图回复。"""
+        # In AstrBot this flag suppresses a second default request after the
+        # explicit ProviderRequest yielded below; it doesn't disable that request.
+        event.should_call_llm(True)
+        if self._reply_cancelled(event):
             return
-        event.set_extra("longhub_bare_mention", True)
-        if not (event.message_str or "").strip():
-            # The native agent skips empty text before on_llm_request. A faithful
-            # text representation lets its normal path load history/persona/tools
-            # while preserving the original message chain and wake/LLM settings.
-            event.message_str = BARE_MENTION_TEXT
+        service = self.service
+        if not service:
+            yield event.plain_result("LONG Hub 尚未初始化。")
+            return
+        try:
+            manager = self.context.conversation_manager
+            origin = event.unified_msg_origin
+            cid = await manager.get_curr_conversation_id(origin)
+            if not cid:
+                cid = await manager.new_conversation(origin, event.get_platform_id())
+            conversation = await manager.get_conversation(origin, cid)
+            if not conversation:
+                cid = await manager.new_conversation(origin, event.get_platform_id())
+                conversation = await manager.get_conversation(origin, cid)
+            if not conversation:
+                raise RuntimeError("无法创建当前会话")
+        except Exception as exc:
+            logger.warning("LONG Hub /l 读取会话失败：%s", service.settings.redact(exc))
+            yield event.plain_result("暂时无法读取会话上下文，请稍后重试。")
+            return
+        if self._reply_cancelled(event):
+            return
+        event.set_extra("longhub_context_command", True)
+        # Bind the conversation, rather than copying history in this handler.
+        # AstrBot reloads its latest history under the session lock and assembles
+        # persona/tools, so queued commands see earlier replies and keep receipts.
+        yield event.request_llm(prompt=CONTEXT_MEME_PROMPT, conversation=conversation)
 
     @staticmethod
     def _send_lock(event):
@@ -523,13 +533,9 @@ class LongHubPlugin(Star):
         except Exception as exc:
             logger.warning("LONG Hub 读取发送记录失败：%s", self.service.settings.redact(exc))
         try:
-            bare_mention = bool(event.get_extra("longhub_bare_mention")) or self._is_bare_mention(
-                event
-            )
-            # Mention IDs and adapter placeholders carry no search intent. Let the
-            # model use the conversation already supplied by AstrBot instead.
+            context_command = bool(event.get_extra("longhub_context_command"))
             candidates = []
-            if not bare_mention and not semantic_ready:
+            if not context_command and not semantic_ready:
                 try:
                     candidates = await self.service.candidates(
                         event.message_str or "", recent=self._recent(event)
@@ -599,12 +605,12 @@ class LongHubPlugin(Star):
             )
             if candidates:
                 block += "\n当前候选：" + json.dumps(candidates, ensure_ascii=False)
-            if bare_mention:
+            if context_command:
                 block += (
-                    "\n[本轮用户仅 @bot]\n"
-                    "用户本轮只 @ 了你，没有附带问题或关键词。"
+                    "\n[本轮用户使用 /l 指令]\n"
+                    "用户明确要求根据当前对话选取合适的龙图。"
                     "请根据已有会话上下文、最近话题和情绪，自主检索并选择一张合适的龙图作为回应。"
-                    "不要询问用户想聊什么、需要哪种表情，也不要把 @、机器人 ID 或提及占位符当作关键词。"
+                    "不要询问用户想聊什么、需要哪种表情，也不要把 /l 指令本身当作检索词。"
                     "仅当已有有意义的上下文且所选回应与其明确相关、语义检索又已开放时，"
                     "才优先把上下文概括为概念并调用语义工具。"
                     "需要按内容筛选时，可提取中英文标签及同义词，用 IN/OR 扩大检索范围，"
