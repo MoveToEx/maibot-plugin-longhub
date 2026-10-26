@@ -600,7 +600,7 @@ class Database:
             if await self._meta("tagging_paused"):
                 return None
             row = await self._one(
-                "SELECT * FROM tag_jobs WHERE status='queued' AND next_attempt<=? ORDER BY updated LIMIT 1",
+                "SELECT * FROM tag_jobs WHERE status='queued' AND next_attempt<=? ORDER BY updated,image_id LIMIT 1",
                 (time.time(),),
             )
             if not row:
@@ -686,6 +686,14 @@ class Database:
             )
             pending = (await self._one("SELECT count(*) FROM notifications WHERE processed=0"))[0]
             jobs = dict(await self._all("SELECT status,count(*) FROM tag_jobs GROUP BY status"))
+            queue = await self._all(
+                """SELECT j.image_id,i.text,j.status,j.attempts,j.next_attempt
+                FROM tag_jobs j JOIN images i ON i.id=j.image_id AND i.generation=?
+                WHERE j.status IN ('running','queued')
+                ORDER BY CASE j.status WHEN 'running' THEN 0 ELSE 1 END,
+                    CASE WHEN j.next_attempt>? THEN 1 ELSE 0 END,j.updated,j.image_id LIMIT 5""",
+                (generation, time.time()),
+            )
             last_hook = await self._one(
                 "SELECT max(received) FROM webhook_logs WHERE http_status=204"
             )
@@ -695,6 +703,8 @@ class Database:
                 "ratings": counts,
                 "pending_notifications": pending,
                 "tag_jobs": jobs,
+                "tag_queue": [{**dict(row), "image_id": str(row["image_id"])} for row in queue],
+                "tagging_auto": bool(await self._meta("tagging_auto")),
                 "tagging_paused": bool(await self._meta("tagging_paused")),
                 "last_sync": await self._meta("last_sync"),
                 "last_webhook": last_hook[0],

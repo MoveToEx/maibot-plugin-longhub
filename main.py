@@ -31,7 +31,7 @@ BARE_MENTION_TEXT = "（用户仅 @ 了机器人，没有附带文字。）"
 SEMANTIC_TOOL = "search_longhub_memes_semantic"
 
 
-@register(PLUGIN_NAME, "MoveToEx", "LONG Hub 同步表情目录", "0.3.4")
+@register(PLUGIN_NAME, "MoveToEx", "LONG Hub 同步表情目录", "0.4.0")
 class LongHubPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -47,6 +47,8 @@ class LongHubPlugin(Star):
             ("sync", self.api_sync, ["POST"]),
             ("tagging/enqueue", self.api_enqueue, ["POST"]),
             ("tagging/pause", self.api_pause, ["POST"]),
+            ("tagging/auto", self.api_auto_tagging, ["POST"]),
+            ("semantic/pause", self.api_pause_semantic, ["POST"]),
             ("semantic/rebuild", self.api_rebuild_semantic, ["POST"]),
             ("webhook/logs", self.api_logs, ["GET"]),
             ("webhook/retry", self.api_retry, ["POST"]),
@@ -862,6 +864,18 @@ class LongHubPlugin(Star):
         if not self.service.settings.embedding_provider_id:
             raise ValueError("请先选择 AstrBot Embedding 提供商")
         return json_response(await self.service.semantic.rebuild())
+
+    async def api_auto_tagging(self):
+        body = await self._body()
+        if not isinstance(body.get("enabled"), bool):
+            raise ValueError("enabled 须为布尔值")
+        return json_response(await self.service.set_auto_tagging(body["enabled"]))
+
+    async def api_pause_semantic(self):
+        body = await self._body()
+        if not isinstance(body.get("paused"), bool):
+            raise ValueError("paused 须为布尔值")
+        return json_response(await self.service.semantic.set_paused(body["paused"]))
 
     async def api_logs(self):
         page, limit = self._pagination()

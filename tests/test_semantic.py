@@ -337,6 +337,41 @@ async def test_manual_rebuild_and_provider_batch_failure(db, image, tmp_path):
     await engine.close()
 
 
+async def test_embedding_pause_keeps_search_and_persists_reset_until_resume(db, image, tmp_path):
+    engine, provider, factory = await setup(db, image, tmp_path)
+    await engine.run_once()
+    calls = len(provider.batch_calls)
+    await engine.set_paused(True)
+    assert (await engine.status())["paused"] and (await engine.status())["available"]
+    assert (await engine.search("开心"))[0]["id"] == "1"
+    await db.update_override(4, {"description": "新标注"})
+    await engine.run_once()
+    assert len(provider.batch_calls) == calls and (await engine.status())["pending"] == 1
+    await engine.rebuild()
+    assert (await engine.status())["indexed"] == 0
+    await engine.run_once()
+    assert not engine.entries and len(provider.batch_calls) == calls
+    await engine.close()
+    resumed = SemanticIndex(db, tmp_path, engine.settings, lambda _: provider, factory)
+    await resumed.run_once()
+    assert (await resumed.status())["paused"] and len(provider.batch_calls) == calls
+    await resumed.set_paused(False)
+    await resumed.run_once()
+    assert (await resumed.status())["available"] and len(resumed.entries) == 4
+    await resumed.close()
+
+
+async def test_reset_during_embedding_discards_old_batch(db, image, tmp_path):
+    engine, provider, _ = await setup(db, image, tmp_path)
+    provider.on_batch = engine.rebuild
+    await engine.run_once()
+    assert not engine.entries and not (await engine.status())["available"]
+    provider.on_batch = None
+    await engine.run_once()
+    assert len(engine.entries) == 3 and (await engine.status())["available"]
+    await engine.close()
+
+
 @pytest.mark.parametrize(
     "vector", [[0, 0, 0], [1, 2], [math.nan, 0, 1], [True, 0, 1], [math.inf, 0, 1]]
 )

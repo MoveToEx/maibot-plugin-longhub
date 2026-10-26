@@ -1,74 +1,25 @@
 import { Tooltip } from '@base-ui/react/tooltip';
-import { ArcElement, Chart, PieController, Tooltip as ChartTooltip } from 'chart.js';
 import { BadgeCheck } from 'lucide-react';
-import { useEffect, useRef } from 'react';
+import { useMemo } from 'react';
+import type { ReactNode } from 'react';
 import type { Status } from '../types';
-import { Panel, PanelHeading } from './ui';
-
-Chart.register(PieController, ArcElement, ChartTooltip);
+import { ProgressPie } from './ProgressPie';
+import { Badge, Panel, PanelHeading } from './ui';
 
 const labels = ['待标注', '已标注未向量化', '已向量化'];
 const colors = ['--chart-pending', '--chart-annotated', '--chart-indexed'];
+const embeddingLabels = ['待向量化', '已向量化'];
+const embeddingColors = ['--chart-pending', '--chart-indexed'];
 
 export function AnnotationChart({ status }: { status: Status }) {
-  const canvas = useRef<HTMLCanvasElement>(null);
   const counts = status.semantic?.catalog;
   const unannotated = counts?.unannotated ?? status.total;
   const annotated = counts?.annotated_unindexed ?? 0;
   const indexed = counts?.indexed ?? 0;
-  const total = unannotated + annotated + indexed;
-
-  useEffect(() => {
-    if (!canvas.current) return;
-    const chart = new Chart(canvas.current, {
-      type: 'pie',
-      data: {
-        labels,
-        datasets: [{ data: [unannotated, annotated, indexed], borderWidth: 3, hoverOffset: 5 }],
-      },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        animation: false,
-        layout: { padding: 6 },
-        plugins: {
-          legend: { display: false },
-          tooltip: {
-            displayColors: false,
-            padding: 10,
-            callbacks: {
-              label: ({ raw }) => {
-                const count = Number(raw);
-                return `${count.toLocaleString()} 张 · ${total ? ((count / total) * 100).toFixed(1) : 0}%`;
-              },
-            },
-          },
-        },
-      },
-    });
-    const updateTheme = () => {
-      const style = getComputedStyle(document.documentElement);
-      chart.data.datasets[0].backgroundColor = colors.map((name) =>
-        style.getPropertyValue(name).trim(),
-      );
-      chart.data.datasets[0].borderColor = style.getPropertyValue('--app-surface').trim();
-      const tooltip = chart.options.plugins!.tooltip!;
-      tooltip.backgroundColor = style.getPropertyValue('--app-ink').trim();
-      tooltip.titleColor = tooltip.bodyColor = style.getPropertyValue('--app-surface').trim();
-      chart.update('none');
-    };
-    updateTheme();
-    const observer = new MutationObserver(updateTheme);
-    observer.observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: ['data-theme'],
-    });
-    return () => {
-      observer.disconnect();
-      chart.destroy();
-    };
-  }, [unannotated, annotated, indexed, total]);
-
+  const values = useMemo(
+    () => [unannotated, annotated, indexed],
+    [unannotated, annotated, indexed],
+  );
   return (
     <Panel id="annotation-chart" className="annotation-panel">
       <PanelHeading
@@ -93,23 +44,63 @@ export function AnnotationChart({ status }: { status: Status }) {
           )
         }
       />
-      <div className={`annotation-pie ${total === 0 ? 'annotation-pie-empty' : ''}`}>
-        <canvas
-          ref={canvas}
-          role="img"
-          aria-label={`图库标注进度：待标注 ${unannotated} 张，已标注未向量化 ${annotated} 张，已向量化 ${indexed} 张`}
-        />
-        {total === 0 && <span className="chart-empty">暂无表情</span>}
-      </div>
-      <ul className="chart-legend" aria-label="标注状态统计">
-        {[unannotated, annotated, indexed].map((count, index) => (
-          <li key={labels[index]}>
-            <span className="chart-dot" style={{ background: `var(${colors[index]})` }} />
-            <span>{labels[index]}</span>
-            <span className="ml-auto tabular-nums text-ink">{count.toLocaleString()}</span>
-          </li>
-        ))}
-      </ul>
+      <ProgressPie values={values} labels={labels} colors={colors} caption="图库标注进度" />
+    </Panel>
+  );
+}
+
+export function EmbeddingProgress({ status, actions }: { status: Status; actions: ReactNode }) {
+  const semantic = status.semantic;
+  const pending = semantic?.pending ?? 0;
+  const indexed = semantic?.indexed ?? 0;
+  const values = useMemo(() => [pending, indexed], [pending, indexed]);
+  const state = !semantic?.configured
+    ? '未配置模型'
+    : semantic.error
+      ? '索引异常'
+      : semantic.paused
+        ? '已暂停'
+        : pending
+          ? '向量化中'
+          : indexed
+            ? '已完成'
+            : '等待标注';
+  return (
+    <Panel id="embedding-progress" className="task-panel">
+      <PanelHeading
+        title="Embedding 进度"
+        action={
+          <Badge
+            tone={
+              semantic?.error
+                ? 'danger'
+                : semantic?.paused
+                  ? 'neutral'
+                  : indexed && !pending
+                    ? 'success'
+                    : 'neutral'
+            }
+          >
+            {state}
+          </Badge>
+        }
+      />
+      <p className="text-xs text-muted mb-4 break-all">
+        {semantic?.model || '在连接与设置中选择嵌入模型'}
+      </p>
+      <ProgressPie
+        values={values}
+        labels={embeddingLabels}
+        colors={embeddingColors}
+        caption="Embedding 进度"
+        emptyLabel="暂无待向量化标注"
+      />
+      {semantic?.error && (
+        <p className="inline-error" role="alert">
+          {semantic.error}
+        </p>
+      )}
+      <div className="task-actions">{actions}</div>
     </Panel>
   );
 }

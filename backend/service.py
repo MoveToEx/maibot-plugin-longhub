@@ -45,6 +45,8 @@ class Service:
         self.background_error = None
         self.next_sync = 0.0
         self.sync_failures = 0
+        self.auto_tag_revision = None
+        self.auto_tag_wakeup = asyncio.Event()
 
     async def start(self):
         try:
@@ -55,6 +57,7 @@ class Service:
                 asyncio.create_task(self._consumer()),
                 asyncio.create_task(self._scheduler()),
                 asyncio.create_task(self.semantic.run()),
+                asyncio.create_task(self._auto_tag_worker()),
             ]
             self.tasks.extend(
                 asyncio.create_task(self._tag_worker())
@@ -153,6 +156,48 @@ class Service:
                 self.background_error = self.settings.redact(exc)
             await asyncio.sleep(5)
 
+    async def set_auto_tagging(self, enabled):
+        if enabled and not self.settings.vision_provider_id:
+            raise ValueError("请先选择支持原生视觉输入的 AstrBot 提供商")
+        await self.db.set_meta("tagging_auto", enabled)
+        self.auto_tag_revision = None
+        self.auto_tag_wakeup.set()
+        return {"enabled": enabled}
+
+    async def auto_enqueue_once(self):
+        if not self.settings.vision_provider_id or not await self.db.get_meta("tagging_auto"):
+            self.auto_tag_revision = None
+            return 0
+        revision = self.db.catalog_revision
+        if self.auto_tag_revision == revision:
+            return 0
+        await self.semantic.refresh()
+        missing = list(self.semantic.unannotated_ids)
+        queued = 0
+        for offset in range(0, len(missing), 100):
+            if not await self.db.get_meta("tagging_auto"):
+                self.auto_tag_revision = None
+                return queued
+            queued += await self.db.enqueue_tags(
+                missing[offset : offset + 100], provider_id=self.settings.vision_provider_id
+            )
+        self.auto_tag_revision = revision
+        return queued
+
+    async def _auto_tag_worker(self):
+        while True:
+            self.auto_tag_wakeup.clear()
+            try:
+                await self.auto_enqueue_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.background_error = self.settings.redact(exc)
+            try:
+                await asyncio.wait_for(self.auto_tag_wakeup.wait(), timeout=2)
+            except TimeoutError:
+                pass
+
     async def status(self):
         return {
             **await self.db.stats(),
@@ -201,9 +246,12 @@ class Service:
         else:
             count = 0
             # Snapshot IDs first: completed jobs must not shift OFFSET pagination.
-            missing = await self.db.missing_annotation_ids()
+            await self.semantic.refresh()
+            missing = list(self.semantic.unannotated_ids)
             for offset in range(0, len(missing), 100):
                 count += await self.db.enqueue_tags(
-                    missing[offset : offset + 100], provider_id=self.settings.vision_provider_id
+                    missing[offset : offset + 100],
+                    force=force,
+                    provider_id=self.settings.vision_provider_id,
                 )
         return {"queued": count}

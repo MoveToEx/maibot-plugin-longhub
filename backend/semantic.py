@@ -93,6 +93,7 @@ class SemanticIndex:
         self.store = self.embeddings = self.provider = self.profile = self.directory = None
         self.entries = {}
         self.desired = {}
+        self.unannotated_ids = []
         self.total = 0
         self.catalog_total = self.catalog_annotated = 0
         self.revision = None
@@ -113,10 +114,13 @@ class SemanticIndex:
             self.catalog_annotated = 0
             self.total = 0
             self.desired = {}
+            self.unannotated_ids = []
             for row in rows:
                 doc = document(row)
                 if doc is not None:
                     self.catalog_annotated += 1
+                else:
+                    self.unannotated_ids.append(row["id"])
                 if row["enabled"] and row["rating"] in self.settings.allowed_ratings:
                     self.total += 1
                     if doc is not None:
@@ -132,6 +136,7 @@ class SemanticIndex:
 
     async def status(self):
         await self.refresh()
+        paused = bool(await self.db.get_meta("semantic_paused"))
         configured = bool(self.settings.embedding_provider_id)
         current = False
         error = self.error
@@ -149,7 +154,7 @@ class SemanticIndex:
             sum(
                 self.entries.get(ident) == doc["fingerprint"] for ident, doc in self.desired.items()
             )
-            if current
+            if current and not self.force_reset and not self.recover
             else 0
         )
         complete = (
@@ -173,12 +178,15 @@ class SemanticIndex:
             state = "empty"
         elif available:
             state = "ready"
+        elif paused:
+            state = "paused"
         elif not complete or self.force_reset or self.recover:
             state = "indexing"
         else:
             state = "insufficient"
         return {
             "configured": configured,
+            "paused": paused,
             "provider_id": self.settings.embedding_provider_id,
             "model": model,
             "total": self.total,
@@ -302,6 +310,8 @@ class SemanticIndex:
                         self.entries.pop(ident, None)
 
                 await self._mutate(remove)
+        if await self.db.get_meta("semantic_paused"):
+            return bool(obsolete)
         missing = [
             doc
             for ident, doc in self.desired.items()
@@ -315,8 +325,12 @@ class SemanticIndex:
         vectors = await embeddings.embed_many([doc["content"] for doc in missing])
         await self.refresh()
         async with self.index_lock:
-            if store is not self.store or profile != provider_profile(
-                self._provider(), self.settings.embedding_provider_id
+            if (
+                store is not self.store
+                or self.force_reset
+                or self.recover
+                or profile
+                != provider_profile(self._provider(), self.settings.embedding_provider_id)
             ):
                 return True
             valid = [
@@ -359,12 +373,18 @@ class SemanticIndex:
                 pass
 
     async def rebuild(self):
-        self.force_reset = True
-        cache = await self.db.get_meta("semantic_cache", {})
-        if cache:
-            await self.db.set_meta("semantic_cache", {**cache, "dirty": True})
+        async with self.index_lock:
+            self.force_reset = True
+            cache = await self.db.get_meta("semantic_cache", {})
+            if cache:
+                await self.db.set_meta("semantic_cache", {**cache, "dirty": True})
         self.wakeup.set()
         return {"queued": True}
+
+    async def set_paused(self, paused):
+        await self.db.set_meta("semantic_paused", paused)
+        self.wakeup.set()
+        return {"paused": paused}
 
     async def search(self, concept, limit=5, recent=()):
         if not isinstance(concept, str) or not concept.strip() or len(concept) > 1000:

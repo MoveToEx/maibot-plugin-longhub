@@ -23,6 +23,14 @@ export interface Status {
   pending_notifications: number;
   tag_jobs: Partial<Record<JobState, number>>;
   tagging_paused: boolean;
+  tagging_auto: boolean;
+  tag_queue: {
+    image_id: string;
+    text: string;
+    status: 'queued' | 'running';
+    attempts: number;
+    next_attempt: number;
+  }[];
   ready: boolean;
   vision_configured: boolean;
   receiver: { started: boolean; error: string | null; listen: string; path: string };
@@ -35,6 +43,7 @@ export interface Status {
 }
 export interface SemanticStatus {
   configured: boolean;
+  paused: boolean;
   provider_id: string;
   model: string;
   total: number;

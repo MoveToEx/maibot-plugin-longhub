@@ -27,10 +27,11 @@ BRIDGE = r"""
   enabled:i!==4,annotation_fresh:i%5!==0,tag_job:{status:'done',error:null}
  }));
  const status={total:65,ratings:{none:58,moderate:7,violent:0},pending_notifications:2,
-  tag_jobs:{queued:12,running:1,done:48,failed:4},tagging_paused:false,ready:true,
+  tag_jobs:{queued:12,running:1,done:48,failed:4},tagging_paused:false,tagging_auto:false,ready:true,
+  tag_queue:items.slice(0,5).map((item,i)=>({image_id:item.id,text:item.text,status:i===0?'running':'queued',attempts:0,next_attempt:0})),
   receiver:{started:true,error:null,listen:'127.0.0.1:8791',path:'/hooks/longhub'},
   sync:{status:'done'},last_sync:{completed_at:1792886400},last_webhook:1792886460,vision_configured:true,
-  semantic:{configured:true,provider_id:'embedding',model:'embedding-demo',total:65,annotated:49,coverage:49/65,indexed:49,pending:0,available:true,state:'ready',error:null,catalog:{total:65,unannotated:16,annotated_unindexed:0,indexed:49}}};
+  semantic:{configured:true,paused:false,provider_id:'embedding',model:'embedding-demo',total:65,annotated:49,coverage:49/65,indexed:49,pending:0,available:true,state:'ready',error:null,catalog:{total:65,unannotated:16,annotated_unindexed:0,indexed:49}}};
  window.__status=status;
  const logs=[
   {id:1,received:1792886460,image_id:'9223372036854775807',event:'update',signature_valid:true,
@@ -76,10 +77,16 @@ BRIDGE = r"""
    }
    if(path==='settings/save'){window.__lastSaved=structuredClone(body);Object.assign(settings,body);return {saved:true};}
    if(path==='tagging/pause'){status.tagging_paused=body.paused;return {paused:body.paused};}
+   if(path==='tagging/auto'){status.tagging_auto=body.enabled;return {enabled:body.enabled};}
+   if(path==='semantic/pause'){status.semantic.paused=body.paused;return {paused:body.paused};}
    if(path==='tagging/enqueue')return {queued:body.ids?.length||16};
    if(path==='sync')return {id:'test-sync',status:'queued'};
    if(path==='webhook/retry')return {queued:true};
-   if(path==='semantic/rebuild')return {queued:true};
+   if(path==='semantic/rebuild'){
+    status.semantic.indexed=0;status.semantic.pending=status.semantic.annotated;status.semantic.available=false;
+    status.semantic.catalog.annotated_unindexed+=status.semantic.catalog.indexed;status.semantic.catalog.indexed=0;
+    return {queued:true};
+   }
    throw new Error('Unexpected POST '+path);
   }
  };
@@ -261,16 +268,78 @@ async def check():
                 await page.get_by_role("checkbox", name="只看失败", exact=True).check()
                 await expect(page.locator("#log-rows tr")).to_have_count(2)
                 await page.locator('[data-tab="tasks"]').click()
-                await page.locator("#pause-tagging").click()
-                await expect(page.locator("#pause-tagging")).to_contain_text("继续队列")
+                await page.evaluate("""() => {
+                    window.__taskSemantic=structuredClone(window.__status.semantic);
+                    Object.assign(window.__status.semantic,{indexed:43,pending:6,available:false,state:'indexing'});
+                    Object.assign(window.__status.semantic.catalog,{annotated_unindexed:6,indexed:43});
+                }""")
+                await page.locator("#refresh").click()
+                await expect(page.locator(".tasks-layout > section")).to_have_count(2)
                 await expect(
-                    page.get_by_role("progressbar", name="有效标注覆盖率")
+                    page.locator(".metrics-grid, .task-callout, .source-cards")
+                ).to_have_count(0)
+                await expect(
+                    page.get_by_role("list", name="标注队列前五项").locator("li")
+                ).to_have_count(5)
+                await expect(
+                    page.get_by_role("link", name="查看标注任务 9223372036854775807", exact=True)
+                ).to_be_visible()
+                await expect(page.locator("#embedding-progress canvas")).to_be_visible()
+                tagging_box = await page.locator("#tagging-progress").bounding_box()
+                embedding_box = await page.locator("#embedding-progress").bounding_box()
+                assert tagging_box["y"] == embedding_box["y"]
+                assert 1.9 < tagging_box["width"] / embedding_box["width"] < 2.1
+                summary_box = await page.locator(".annotation-overview").bounding_box()
+                queue_box = await page.locator(".tagging-queue").bounding_box()
+                assert 2.9 < summary_box["width"] / queue_box["width"] < 3.1
+                await expect(page.locator("#embedding-progress canvas")).to_have_attribute(
+                    "aria-label", "Embedding 进度：待向量化 6 张，已向量化 43 张"
+                )
+                await page.locator("#refresh").focus()
+                await page.screenshot(path=str(output / "tasks.png"), full_page=True)
+                await page.get_by_role("switch", name="自动标注", exact=True).click()
+                await expect(
+                    page.get_by_role("switch", name="自动标注", exact=True)
+                ).to_be_checked()
+                await page.locator("#pause-tagging").click()
+                await expect(page.locator("#pause-tagging")).to_have_attribute(
+                    "aria-label", "继续标注队列"
+                )
+                await expect(
+                    page.get_by_role("progressbar", name="图库标注进度")
                 ).to_have_attribute("aria-valuenow", "75")
+                await page.locator("#pause-embedding").hover()
+                await expect(page.get_by_role("tooltip")).to_contain_text("暂停新的后台向量化任务")
+                await page.locator("#pause-embedding").click()
+                await expect(page.locator("#pause-embedding")).to_have_attribute(
+                    "aria-label", "继续 Embedding"
+                )
+                await page.locator("#tag-missing").click()
+                await page.wait_for_function(
+                    "window.__calls.some(x=>x.path==='tagging/enqueue'&&x.body.force===true)"
+                )
                 await page.locator("#rebuild-semantic").click()
                 await page.wait_for_function(
                     "window.__calls.some(x=>x.method==='POST'&&x.path==='semantic/rebuild')"
                 )
-                await page.screenshot(path=str(output / "tasks.png"), full_page=True)
+                await expect(page.locator("#embedding-progress canvas")).to_have_attribute(
+                    "aria-label", "Embedding 进度：待向量化 49 张，已向量化 0 张"
+                )
+                await page.locator("#refresh").focus()
+                await page.screenshot(path=str(output / "tasks-paused.png"), full_page=True)
+                await page.locator("#pause-embedding").click()
+                await expect(page.locator("#pause-embedding")).to_have_attribute(
+                    "aria-label", "暂停 Embedding"
+                )
+                await page.locator("#pause-tagging").click()
+                await page.get_by_role("switch", name="自动标注", exact=True).click()
+                await expect(
+                    page.get_by_role("switch", name="自动标注", exact=True)
+                ).not_to_be_checked()
+                await page.evaluate(
+                    "Object.assign(window.__status.semantic, window.__taskSemantic)"
+                )
+                await page.locator("#refresh").click()
                 await page.locator('[data-tab="settings"]').click()
                 await page.locator('[name="tagging_rpm"]').fill("9")
                 await page.locator('[name="embedding_rpm"]').fill("12")
@@ -303,6 +372,9 @@ async def check():
                     "background-color", "rgb(28, 29, 37)"
                 )
                 await page.screenshot(path=str(output / "overview-dark.png"), full_page=True)
+                await page.locator('[data-tab="tasks"]').click()
+                await expect(page.locator("#embedding-progress canvas")).to_be_visible()
+                await page.screenshot(path=str(output / "tasks-dark.png"), full_page=True)
                 await page.evaluate("document.documentElement.dataset.theme='light'")
                 await page.set_viewport_size({"width": 390, "height": 844})
                 for tab in ["overview", "catalog", "logs", "tasks", "settings"]:
@@ -313,7 +385,9 @@ async def check():
                         "document.documentElement.scrollWidth <= innerWidth"
                     ), tab
                     if tab in ["overview", "catalog", "tasks"]:
-                        await page.screenshot(path=str(output / f"{tab}-mobile.png"))
+                        await page.screenshot(
+                            path=str(output / f"{tab}-mobile.png"), full_page=tab == "tasks"
+                        )
                 await page.set_viewport_size({"width": 1440, "height": 1100})
                 await page.goto(url + "#/catalog/9223372036854775807")
                 await expect(page.locator("#manual-tags")).to_be_visible()
