@@ -428,6 +428,7 @@ async def test_request_tool_gating_and_preference_are_local(plugin, plugin_modul
     else:
         plugin.service.candidates.assert_awaited_once()
     assert "RANDOM()" not in req.system_prompt and "随机" not in req.system_prompt
+    assert "每轮回复结束前，必须先调用一次 LONG Hub 搜索工具" in req.system_prompt
 
 
 async def test_tool_returns_candidates_without_sending_and_embedding_settings_validation(

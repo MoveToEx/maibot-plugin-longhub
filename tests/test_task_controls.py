@@ -11,7 +11,14 @@ from tests.test_plugin import plugin_module as plugin_module
 async def test_queue_preview_is_current_ordered_limited_and_preserves_large_ids(db, image):
     ident = 2**63 - 1
     await publish(db, [image(i) for i in range(1, 8)] + [image(ident)])
-    await db.enqueue_tags([ident, 1, 2, 3, 4, 5, 6, 7])
+    ordered = [ident, 1, 2, 3, 4, 5, 6, 7]
+    await db.enqueue_tags(ordered)
+    # Windows clocks can give several enqueues the same timestamp.
+    await db.conn.executemany(
+        "UPDATE tag_jobs SET updated=? WHERE image_id=?",
+        [(index, image_id) for index, image_id in enumerate(ordered)],
+    )
+    await db.conn.commit()
     assert (await db.claim_tag())["image_id"] == ident
     generation = await db.get_meta("active_generation")
     await db.refresh(generation, 1, None)

@@ -222,6 +222,7 @@ async def test_candidate_search_failure_cannot_hide_delivery_facts(plugin, db, i
     req = request()
     await plugin.provide_candidates(Event(), req)
     assert "[LONG Hub 已发送表情记录]" in req.system_prompt
+    assert "[LONG Hub 表情工具]" in req.system_prompt
 
 
 async def test_memory_write_failure_does_not_turn_a_sent_image_into_tool_failure(
