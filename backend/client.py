@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import zlib
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from urllib.parse import urljoin, urlsplit
 
 import aiohttp
@@ -83,7 +85,7 @@ class HubClient:
             auto_decompress=False,
             trust_env=False,
             cookie_jar=aiohttp.DummyCookieJar(),
-            headers={"User-Agent": "astrbot-plugin-longhub/0.4.5"},
+            headers={"User-Agent": "astrbot-plugin-longhub/0.4.6"},
         )
 
     async def close(self):
@@ -103,6 +105,41 @@ class HubClient:
         except ValueError:
             retry = 0
         raise HubError(response.status, f"LONG Hub HTTP {response.status}", retry)
+
+    async def catalog_version(self) -> str | None:
+        async with self.session.get(
+            self.settings.api_base + "/sync/version",
+            headers={**self.auth, "Accept-Encoding": "identity"},
+            timeout=aiohttp.ClientTimeout(total=30),
+            allow_redirects=False,
+        ) as response:
+            await self._check(response)
+            if response.status != 200 or response.content_type != "application/json":
+                raise ValueError("目录版本响应状态或 Content-Type 无效")
+            raw = bytearray()
+            async for chunk in response.content.iter_chunked(8192):
+                raw.extend(chunk)
+                if len(raw) > 65536:
+                    raise ValueError("目录版本响应过大")
+            envelope = json.loads(raw)
+            if (
+                not isinstance(envelope, dict)
+                or envelope.get("error") is not None
+                or not isinstance(envelope.get("data"), dict)
+                or "timestamp" not in envelope["data"]
+            ):
+                raise ValueError("目录版本响应格式错误")
+            timestamp = envelope["data"]["timestamp"]
+            if timestamp is not None:
+                if not isinstance(timestamp, str) or not re.fullmatch(
+                    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
+                    r"(?:\.[0-9]{1,9})?(?:Z|\+00:00)",
+                    timestamp,
+                ):
+                    raise ValueError("目录版本时间戳无效")
+                # Validate the calendar without rounding away subsecond precision.
+                datetime.fromisoformat(timestamp)
+            return timestamp
 
     async def export(self, consume: Callable[[list[dict]], Awaitable[None]]) -> dict:
         async with self.session.get(

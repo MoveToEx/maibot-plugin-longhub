@@ -64,6 +64,9 @@ async def test_snapshot_handoff_does_not_ack_later_arrivals(db, image):
     class Client:
         reads = 0
 
+        async def catalog_version(self):
+            return "2026-10-27T08:30:00.123456Z"
+
         async def export(self, consume):
             await consume([image(1, text="快照"), image(3)])
             return {"export_id": "new", "record_count": 2}
@@ -92,6 +95,9 @@ async def test_failed_export_keeps_active_catalog_and_receipts(db, image):
     await receipt(db)
 
     class Client:
+        async def catalog_version(self):
+            return "2026-10-27T08:30:00.123456Z"
+
         async def export(self, consume):
             await consume([image(2)])
             raise ValueError("missing end")

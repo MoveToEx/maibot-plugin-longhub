@@ -154,6 +154,27 @@ async def check():
                     page.get_by_role("heading", name="目录分布", exact=True)
                 ).to_have_count(0)
                 await expect(page.locator("#catalog-total")).to_contain_text("65")
+                await page.evaluate(
+                    "Object.assign(window.__status.sync,{status:'running',phase:'checking_version'})"
+                )
+                await page.locator("#refresh").click()
+                await expect(page.locator("#sync-panel")).to_contain_text("正在检查远端目录版本")
+                await expect(
+                    page.get_by_role("button", name="校准进行中", exact=True)
+                ).to_be_disabled()
+                await page.evaluate(
+                    "Object.assign(window.__status.sync,{status:'done',skipped:true})"
+                )
+                await page.locator("#refresh").click()
+                await expect(page.locator("#sync-panel")).to_contain_text(
+                    "远端目录未变化，已跳过全量同步"
+                )
+                await page.get_by_role("button", name="立即校准", exact=True).click()
+                await page.wait_for_function(
+                    "window.__calls.some(x=>x.method==='POST'&&x.path==='sync')"
+                )
+                await page.evaluate("window.__status.sync={status:'done'}")
+                await page.locator("#refresh").click()
                 await expect(page.locator("#annotation-chart canvas")).to_have_attribute(
                     "aria-label", "图库标注进度：待标注 16 张，已标注未向量化 0 张，已向量化 49 张"
                 )

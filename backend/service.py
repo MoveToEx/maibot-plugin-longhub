@@ -80,7 +80,7 @@ class Service:
         await self.semantic.close()
         await self.db.close()
 
-    def start_sync(self):
+    def start_sync(self, *, force=False):
         if not self.settings.ready:
             raise ValueError("请填写 Appkey、webhook 密钥，并确认 Hub 上的订阅已启用")
         if not self.webhook.started:
@@ -89,12 +89,12 @@ class Service:
             return self.sync.status
         # Set status before yielding so the caller receives the correct job ID.
         self.sync.status = {"id": uuid.uuid4().hex, "status": "queued"}
-        self.sync_task = asyncio.create_task(self._run_sync())
+        self.sync_task = asyncio.create_task(self._run_sync(force=force))
         return self.sync.status
 
-    async def _run_sync(self):
+    async def _run_sync(self, *, force=False):
         try:
-            await self.sync.sync()
+            await self.sync.sync(force=force)
             self.sync_failures = 0
             self.next_sync = time.time() + self.settings.sync_interval_hours * 3600
         except asyncio.CancelledError:

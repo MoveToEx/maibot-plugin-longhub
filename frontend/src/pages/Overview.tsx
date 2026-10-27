@@ -73,8 +73,12 @@ export function Overview() {
             <Detail label="上次完整校准">{formatDate(s.last_sync?.completed_at)}</Detail>
             <Detail label="当前进度">
               {syncBusy
-                ? `已导入 ${(s.sync.imported || 0).toLocaleString()} 条 · 刷新 ${s.sync.refreshed || 0} 张`
-                : '等待下一次校准'}
+                ? s.sync.phase === 'checking_version'
+                  ? '正在检查远端目录版本'
+                  : `已导入 ${(s.sync.imported || 0).toLocaleString()} 条 · 刷新 ${s.sync.refreshed || 0} 张`
+                : s.sync.skipped
+                  ? '远端目录未变化，已跳过全量同步'
+                  : '等待下一次校准'}
             </Detail>
           </dl>
           {syncError && (
@@ -89,13 +93,13 @@ export function Overview() {
               onClick={() =>
                 run(async () => {
                   await api.post('sync');
-                  notify('全量校准已加入队列。');
+                  notify('目录校准已加入队列。');
                   refresh();
                 })
               }
             >
               <RefreshCw size={14} />
-              {syncBusy ? '校准进行中' : '立即全量校准'}
+              {syncBusy ? '校准进行中' : '立即校准'}
             </Button>
           </div>
         </Panel>

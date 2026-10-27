@@ -34,7 +34,15 @@ export interface Status {
   ready: boolean;
   vision_configured: boolean;
   receiver: { started: boolean; error: string | null; listen: string; path: string };
-  sync: { id?: string; status: JobState; imported?: number; refreshed?: number; error?: string };
+  sync: {
+    id?: string;
+    status: JobState;
+    imported?: number;
+    refreshed?: number;
+    error?: string;
+    phase?: string;
+    skipped?: boolean;
+  };
   last_sync: { completed_at: number } | null;
   last_webhook: number | null;
   sync_error?: string | null;

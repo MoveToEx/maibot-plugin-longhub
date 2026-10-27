@@ -32,7 +32,7 @@ CONTEXT_MEME_PROMPT = "请根据当前会话上下文、最近话题和情绪，
 SEMANTIC_TOOL = "search_longhub_memes_semantic"
 
 
-@register(PLUGIN_NAME, "MoveToEx", "LONG Hub 同步表情目录", "0.4.5")
+@register(PLUGIN_NAME, "MoveToEx", "LONG Hub 同步表情目录", "0.4.6")
 class LongHubPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -951,7 +951,11 @@ class LongHubPlugin(Star):
         return json_response(await self.service.db.get_image(ident))
 
     async def api_sync(self):
-        return json_response(self.service.start_sync())
+        body = await self._body()
+        force = body.get("force", False)
+        if not isinstance(force, bool):
+            raise ValueError("force 须为布尔值")
+        return json_response(self.service.start_sync(force=force))
 
     async def api_enqueue(self):
         body = await self._body()

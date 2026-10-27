@@ -14,6 +14,7 @@ from tests.conftest import publish
 async def test_startup_sync_and_job_identity(tmp_path):
     settings = Settings(app_key="key", webhook_secret="secret", webhook_ready=True, webhook_port=0)
     service = Service(tmp_path, settings, AsyncMock())
+    service.client.catalog_version = AsyncMock(return_value="2026-10-27T08:30:00.123456Z")
     service.client.export = AsyncMock(return_value={"export_id": "startup", "record_count": 0})
     await service.start()
     try:
@@ -36,6 +37,7 @@ async def test_cancellation_keeps_catalog_and_accepts_notifications_during_expor
     await seed.close()
     settings = Settings(app_key="key", webhook_secret="secret", webhook_ready=True, webhook_port=0)
     service = Service(tmp_path, settings, AsyncMock())
+    service.client.catalog_version = AsyncMock(return_value="2026-10-27T08:30:00.123456Z")
     started = asyncio.Event()
 
     async def export(consume):
@@ -74,12 +76,14 @@ async def test_cancellation_keeps_catalog_and_accepts_notifications_during_expor
 
 async def test_unconfigured_startup_still_exposes_status_without_network(tmp_path):
     service = Service(tmp_path, Settings(webhook_port=0), AsyncMock())
+    service.client.catalog_version = AsyncMock()
     service.client.export = AsyncMock()
     await service.start()
     try:
         status = await service.status()
         assert not status["ready"] and status["receiver"]["started"]
         service.client.export.assert_not_awaited()
+        service.client.catalog_version.assert_not_awaited()
     finally:
         await service.close()
 
