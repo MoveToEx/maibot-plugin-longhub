@@ -1,6 +1,6 @@
 name: longhub
 display_name: LONG Hub 表情目录
 desc: 同步 LONG Hub 元数据，按语境检索和发送远程表情，提供标签管理与 webhook 日志。
-version: v0.4.6
+version: v0.5.0
 author: MoveToEx
 astrbot_version: ">=4.29.3"

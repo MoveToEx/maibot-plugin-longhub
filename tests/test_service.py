@@ -4,9 +4,11 @@ import hmac
 from unittest.mock import AsyncMock
 
 import aiohttp
+from sqlalchemy import update
 
 from backend.database import Database
 from backend.models import Settings
+from backend.orm import TagJob
 from backend.service import Service
 from tests.conftest import publish
 
@@ -102,8 +104,8 @@ async def test_auto_enqueue_tracks_current_missing_annotations_and_persists(tmp_
         job = await service.db.claim_tag()
         for _ in range(3):
             await service.db.fail_tag(job, "模型失败")
-            await service.db.conn.execute("UPDATE tag_jobs SET next_attempt=0")
-            await service.db.conn.commit()
+            async with service.db.transaction() as session:
+                await session.execute(update(TagJob).values(next_attempt=0))
             job = await service.db.claim_tag()
             if job is None:
                 break

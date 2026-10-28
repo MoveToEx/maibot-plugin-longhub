@@ -5,8 +5,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 from PIL import Image
+from sqlalchemy import update
 
 from backend.models import PROMPT_VERSION, Settings
+from backend.orm import Annotation, TagJob
 from backend.tagging import TAG_PROMPT, Tagger, model_image, parse_annotation
 from tests.conftest import publish
 
@@ -115,11 +117,19 @@ async def test_pausing_and_duplicate_queue(db, image):
 async def test_old_prompt_annotations_can_be_refreshed_without_losing_manual_edits(db, image):
     await publish(db, [image(tag_names=["genshin_impact"])])
     await db.update_override(1, {"manual_tags": ["人工"], "description": "人工描述"})
-    await db.conn.execute(
-        "INSERT INTO annotations VALUES(?,?,?,?,?,?,?,?)",
-        (1, "1.gif", "确实", "vision", PROMPT_VERSION - 1, "旧描述", '["旧标签"]', 0),
-    )
-    await db.conn.commit()
+    async with db.transaction() as session:
+        session.add(
+            Annotation(
+                image_id=1,
+                image_key="1.gif",
+                source_text="确实",
+                provider_id="vision",
+                prompt_version=PROMPT_VERSION - 1,
+                description="旧描述",
+                tags=["旧标签"],
+                updated=0,
+            )
+        )
     item = await db.get_image(1)
     assert not item["annotation_fresh"] and "旧标签" in item["effective_tags"]
     assert await db.missing_annotation_ids() == [1]
@@ -158,9 +168,8 @@ async def test_failure_count_and_manual_retry(db, image):
     for _ in range(3):
         job = await db.claim_tag()
         await db.fail_tag(job, "model unavailable")
-        async with db.lock:
-            await db.conn.execute("UPDATE tag_jobs SET next_attempt=0")
-            await db.conn.commit()
+        async with db.transaction() as session:
+            await session.execute(update(TagJob).values(next_attempt=0))
     item = await db.get_image(1)
     assert item["tag_job"]["status"] == "failed"
     assert not await db.enqueue_tags([1], provider_id="vision")

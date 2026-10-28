@@ -24,22 +24,16 @@ def document(row):
         and row["ai_source_text"] == row["text"]
         and row["prompt_version"] == PROMPT_VERSION
     )
-    excluded = set(json.loads(row["excluded_tags"]))
-    manual = [tag for tag in json.loads(row["manual_tags"]) if tag not in excluded]
-    visual = (
-        [tag for tag in json.loads(row["ai_tags"] or "[]") if tag not in excluded] if fresh else []
-    )
+    excluded = set(row["excluded_tags"])
+    manual = [tag for tag in row["manual_tags"] if tag not in excluded]
+    visual = [tag for tag in row["ai_tags"] if tag not in excluded] if fresh else []
     description = row["manual_description"]
     if description is None:
         description = row["ai_description"] if fresh else ""
     description = description or ""
     if not (description.strip() or manual or visual):
         return None
-    tags = [
-        tag
-        for tag in dict.fromkeys(json.loads(row["hub_tags"]) + visual + manual)
-        if tag not in excluded
-    ]
+    tags = [tag for tag in dict.fromkeys(row["hub_tags"] + visual + manual) if tag not in excluded]
     content = (
         f"画面与使用场景：{description[:1000]}\n图片中的文字：{row['text'][:300]}\n标签："
         + "、".join(tag[:40] for tag in tags[:24])

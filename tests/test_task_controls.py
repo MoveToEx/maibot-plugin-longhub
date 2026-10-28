@@ -2,7 +2,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy import update
 
+from backend.orm import TagJob
 from tests.conftest import publish
 from tests.test_plugin import plugin as plugin
 from tests.test_plugin import plugin_module as plugin_module
@@ -14,16 +16,18 @@ async def test_queue_preview_is_current_ordered_limited_and_preserves_large_ids(
     ordered = [ident, 1, 2, 3, 4, 5, 6, 7]
     await db.enqueue_tags(ordered)
     # Windows clocks can give several enqueues the same timestamp.
-    await db.conn.executemany(
-        "UPDATE tag_jobs SET updated=? WHERE image_id=?",
-        [(index, image_id) for index, image_id in enumerate(ordered)],
-    )
-    await db.conn.commit()
+    async with db.transaction() as session:
+        for index, image_id in enumerate(ordered):
+            await session.execute(
+                update(TagJob).where(TagJob.image_id == image_id).values(updated=index)
+            )
     assert (await db.claim_tag())["image_id"] == ident
     generation = await db.get_meta("active_generation")
     await db.refresh(generation, 1, None)
-    await db.conn.execute("UPDATE tag_jobs SET next_attempt=9999999999 WHERE image_id=2")
-    await db.conn.commit()
+    async with db.transaction() as session:
+        await session.execute(
+            update(TagJob).where(TagJob.image_id == 2).values(next_attempt=9999999999)
+        )
     snapshot = await db.new_generation()
     await db.stage_batch(snapshot, [image(99)])
     queue = (await db.stats())["tag_queue"]

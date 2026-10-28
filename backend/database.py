@@ -1,364 +1,319 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from threading import Event
 
-import aiosqlite
+from sqlalchemy import (
+    Text,
+    and_,
+    case,
+    cast,
+    delete,
+    func,
+    insert,
+    or_,
+    select,
+    type_coerce,
+    update,
+)
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.engine import URL
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import AsyncAdaptedQueuePool
 
 from .models import PROMPT_VERSION, RATINGS, normalize_image, tokenize
+from .orm import (
+    Annotation,
+    Base,
+    CatalogImage,
+    Generation,
+    Meta,
+    Notification,
+    Override,
+    SearchEntry,
+    SentMeme,
+    TagJob,
+    WebhookLog,
+    configure_sqlite,
+    entity_dict,
+    image_view,
+    json_dump,
+)
 from .sql_query import query_catalog, validate_query
 
 
-def dump(value) -> str:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-
-
 class Database:
-    """One serialized connection; no transaction spans external I/O."""
+    """Short-lived ORM transactions; no session spans external I/O."""
 
     def __init__(self, path: Path):
         self.path = path
         self.lock = asyncio.Lock()
         self.query_lock = asyncio.Lock()
         self.catalog_revision = 0
-        self.conn: aiosqlite.Connection | None = None
+        self.engine = None
+        self.sessions: async_sessionmaker[AsyncSession] | None = None
 
     async def open(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = await aiosqlite.connect(self.path)
-        self.conn.row_factory = aiosqlite.Row
-        await self.conn.executescript("""
-            PRAGMA journal_mode=WAL;
-            PRAGMA synchronous=FULL;
-            PRAGMA busy_timeout=5000;
-            CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS generations(
-                id TEXT PRIMARY KEY, created REAL NOT NULL, export_id TEXT);
-            CREATE TABLE IF NOT EXISTS images(
-                generation TEXT NOT NULL, id INTEGER NOT NULL, text TEXT NOT NULL,
-                rating TEXT NOT NULL, image_url TEXT NOT NULL, image_key TEXT NOT NULL,
-                hub_tags TEXT NOT NULL, raw TEXT NOT NULL, PRIMARY KEY(generation,id));
-            CREATE TABLE IF NOT EXISTS overrides(
-                image_id INTEGER PRIMARY KEY, manual_tags TEXT NOT NULL DEFAULT '[]',
-                excluded_tags TEXT NOT NULL DEFAULT '[]', description TEXT,
-                enabled INTEGER NOT NULL DEFAULT 1);
-            CREATE TABLE IF NOT EXISTS annotations(
-                image_id INTEGER PRIMARY KEY, image_key TEXT NOT NULL, source_text TEXT NOT NULL,
-                provider_id TEXT NOT NULL, prompt_version INTEGER NOT NULL,
-                description TEXT NOT NULL, tags TEXT NOT NULL, updated REAL NOT NULL);
-            CREATE TABLE IF NOT EXISTS notifications(
-                id INTEGER PRIMARY KEY AUTOINCREMENT, image_id INTEGER NOT NULL,
-                event TEXT NOT NULL, received REAL NOT NULL, processed INTEGER NOT NULL DEFAULT 0,
-                attempts INTEGER NOT NULL DEFAULT 0, next_attempt REAL NOT NULL DEFAULT 0,
-                error TEXT);
-            CREATE INDEX IF NOT EXISTS notifications_pending
-                ON notifications(processed,next_attempt,image_id);
-            CREATE TABLE IF NOT EXISTS webhook_logs(
-                id INTEGER PRIMARY KEY AUTOINCREMENT, received REAL NOT NULL,
-                receipt_id INTEGER, event TEXT, image_id TEXT, signature_valid INTEGER NOT NULL,
-                http_status INTEGER NOT NULL, body TEXT NOT NULL, error TEXT);
-            CREATE TABLE IF NOT EXISTS tag_jobs(
-                image_id INTEGER PRIMARY KEY, status TEXT NOT NULL,
-                attempts INTEGER NOT NULL DEFAULT 0, next_attempt REAL NOT NULL DEFAULT 0,
-                error TEXT, lease TEXT, updated REAL NOT NULL);
-            CREATE TABLE IF NOT EXISTS sent_memes(
-                id INTEGER PRIMARY KEY AUTOINCREMENT, receipt_id TEXT NOT NULL UNIQUE,
-                session TEXT NOT NULL, conversation TEXT NOT NULL, sent_at REAL NOT NULL,
-                image_id TEXT NOT NULL, details TEXT NOT NULL);
-            CREATE INDEX IF NOT EXISTS sent_memes_scope
-                ON sent_memes(session,conversation,id DESC);
-            CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
-                generation UNINDEXED, image_id UNINDEXED, text, manual_tags, tags, description,
-                tokenize='unicode61');
-            PRAGMA user_version=2;
-        """)
-        await self.conn.execute(
-            "UPDATE tag_jobs SET status='queued', lease=NULL WHERE status='running'"
+        self.engine = create_async_engine(
+            URL.create("sqlite+aiosqlite", database=str(self.path.resolve())),
+            json_serializer=json_dump,
+            poolclass=AsyncAdaptedQueuePool,
+            pool_size=1,
+            max_overflow=0,
         )
-        active = await self._meta("active_generation")
-        # An interrupted export is never published or reused.
-        await self.conn.execute("DELETE FROM images WHERE generation != ?", (active or "",))
-        await self.conn.execute("DELETE FROM search_index WHERE generation != ?", (active or "",))
-        await self.conn.execute("DELETE FROM generations WHERE id != ?", (active or "",))
-        await self.conn.commit()
-
-    async def close(self):
-        if self.conn:
-            await self.conn.close()
-            self.conn = None
-
-    async def _one(self, sql, args=()):
-        async with self.conn.execute(sql, args) as cursor:
-            return await cursor.fetchone()
-
-    @asynccontextmanager
-    async def _transaction(self):
+        configure_sqlite(self.engine.sync_engine)
+        self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
         try:
-            yield
-            await self.conn.commit()
+            async with self.engine.begin() as connection:
+                await connection.run_sync(Base.metadata.create_all)
+                await connection.exec_driver_sql("PRAGMA user_version=2")
+            async with self.transaction() as session:
+                await session.execute(
+                    update(TagJob)
+                    .where(TagJob.status == "running")
+                    .values(status="queued", lease=None)
+                )
+                active = await self._meta(session, "active_generation")
+                await self._remove_other_generations(session, active or "")
         except BaseException:
-            await self.conn.rollback()
+            await self.close()
             raise
 
-    async def _all(self, sql, args=()):
-        async with self.conn.execute(sql, args) as cursor:
-            return await cursor.fetchall()
+    async def close(self):
+        if self.engine is not None:
+            await self.engine.dispose()
+            self.engine = self.sessions = None
 
-    async def _meta(self, key):
-        row = await self._one("SELECT value FROM meta WHERE key=?", (key,))
-        return json.loads(row[0]) if row else None
+    @asynccontextmanager
+    async def transaction(self):
+        if self.sessions is None:
+            raise RuntimeError("数据库尚未打开")
+        async with self.lock, self.sessions.begin() as session:
+            yield session
 
-    async def _set_meta(self, key, value):
-        await self.conn.execute("INSERT OR REPLACE INTO meta VALUES(?,?)", (key, dump(value)))
+    @staticmethod
+    async def _meta(session, key):
+        row = await session.get(Meta, key)
+        return row.value if row else None
+
+    @staticmethod
+    async def _set_meta(session, key, value):
+        await session.merge(Meta(key=key, value=value))
 
     async def get_meta(self, key, default=None):
-        async with self.lock:
-            value = await self._meta(key)
+        async with self.transaction() as session:
+            value = await self._meta(session, key)
             return default if value is None else value
 
     async def set_meta(self, key, value):
-        async with self.lock:
-            await self._set_meta(key, value)
-            await self.conn.commit()
+        async with self.transaction() as session:
+            await self._set_meta(session, key, value)
 
     async def record_sent_meme(self, session, conversation, receipt_id, details):
-        async with self.lock, self._transaction():
-            await self.conn.execute(
-                "INSERT OR IGNORE INTO sent_memes(receipt_id,session,conversation,sent_at,image_id,details) VALUES(?,?,?,?,?,?)",
-                (
-                    receipt_id,
-                    session,
-                    conversation,
-                    time.time(),
-                    details["image_id"],
-                    dump(details),
-                ),
+        async with self.transaction() as db_session:
+            await db_session.execute(
+                sqlite_insert(SentMeme)
+                .values(
+                    receipt_id=receipt_id,
+                    session=session,
+                    conversation=conversation,
+                    sent_at=time.time(),
+                    image_id=details["image_id"],
+                    details=details,
+                )
+                .on_conflict_do_nothing(index_elements=[SentMeme.receipt_id])
             )
-            # Keep bounded metadata only: 20 receipts per conversation, 10,000 overall.
-            await self.conn.execute(
-                """DELETE FROM sent_memes WHERE session=? AND conversation=? AND id NOT IN
-                (SELECT id FROM sent_memes WHERE session=? AND conversation=? ORDER BY id DESC LIMIT 20)""",
-                (session, conversation, session, conversation),
-            )
-            await self.conn.execute(
-                "DELETE FROM sent_memes WHERE id NOT IN (SELECT id FROM sent_memes ORDER BY id DESC LIMIT 10000)"
-            )
+            scope = and_(SentMeme.session == session, SentMeme.conversation == conversation)
+            keep = select(SentMeme.id).where(scope).order_by(SentMeme.id.desc()).limit(20)
+            await db_session.execute(delete(SentMeme).where(scope, SentMeme.id.not_in(keep)))
+            keep = select(SentMeme.id).order_by(SentMeme.id.desc()).limit(10000)
+            await db_session.execute(delete(SentMeme).where(SentMeme.id.not_in(keep)))
 
     async def recent_sent_memes(self, session, conversation, limit=5):
-        async with self.lock:
-            rows = await self._all(
-                "SELECT sent_at,details FROM sent_memes WHERE session=? AND conversation=? ORDER BY id DESC LIMIT ?",
-                (session, conversation, limit),
-            )
-            return [
-                {"sent_at": row["sent_at"], **json.loads(row["details"])} for row in reversed(rows)
-            ]
+        async with self.transaction() as db_session:
+            rows = (
+                await db_session.scalars(
+                    select(SentMeme)
+                    .where(SentMeme.session == session, SentMeme.conversation == conversation)
+                    .order_by(SentMeme.id.desc())
+                    .limit(limit)
+                )
+            ).all()
+            return [{"sent_at": row.sent_at, **row.details} for row in reversed(rows)]
 
     async def clear_sent_memes(self, session, conversation):
-        async with self.lock, self._transaction():
-            await self.conn.execute(
-                "DELETE FROM sent_memes WHERE session=? AND conversation=?", (session, conversation)
+        async with self.transaction() as db_session:
+            await db_session.execute(
+                delete(SentMeme).where(
+                    SentMeme.session == session, SentMeme.conversation == conversation
+                )
             )
 
     async def new_generation(self) -> str:
         generation = uuid.uuid4().hex
-        async with self.lock:
-            await self.conn.execute(
-                "INSERT INTO generations VALUES(?,?,NULL)", (generation, time.time())
-            )
-            await self.conn.commit()
+        async with self.transaction() as session:
+            session.add(Generation(id=generation))
         return generation
 
-    async def _view(self, row) -> dict:
-        item = dict(row)
-        ident = item["id"]
-        override = await self._one("SELECT * FROM overrides WHERE image_id=?", (ident,))
-        annotation = await self._one("SELECT * FROM annotations WHERE image_id=?", (ident,))
-        item["id"] = str(ident)
-        item["hub_tags"] = json.loads(item["hub_tags"])
-        item["manual_tags"] = json.loads(override["manual_tags"]) if override else []
-        item["excluded_tags"] = json.loads(override["excluded_tags"]) if override else []
-        item["enabled"] = bool(override["enabled"]) if override else True
-        item["manual_description"] = override["description"] if override else None
-        item["ai_tags"] = json.loads(annotation["tags"]) if annotation else []
-        item["ai_description"] = annotation["description"] if annotation else ""
-        item["description"] = (
-            item["manual_description"]
-            if item["manual_description"] is not None
-            else item["ai_description"]
+    @staticmethod
+    def _image_query():
+        return (
+            select(CatalogImage, Override, Annotation, TagJob)
+            .outerjoin(Override, Override.image_id == CatalogImage.id)
+            .outerjoin(Annotation, Annotation.image_id == CatalogImage.id)
+            .outerjoin(TagJob, TagJob.image_id == CatalogImage.id)
         )
-        item["effective_tags"] = [
-            x
-            for x in dict.fromkeys(item["hub_tags"] + item["ai_tags"] + item["manual_tags"])
-            if x not in item["excluded_tags"]
-        ]
-        item["annotation_fresh"] = bool(
-            annotation
-            and annotation["image_key"] == item["image_key"]
-            and annotation["source_text"] == item["text"]
-            and annotation["prompt_version"] == PROMPT_VERSION
-        )
-        item["annotation_provider"] = annotation["provider_id"] if annotation else None
-        job = await self._one(
-            "SELECT status,attempts,error FROM tag_jobs WHERE image_id=?", (ident,)
-        )
-        item["tag_job"] = dict(job) if job else None
-        item["raw"] = json.loads(item["raw"])
 
-        # Convert upstream IDs recursively before crossing the JavaScript boundary.
-        def safe(value):
-            if isinstance(value, bool):
-                return value
-            if isinstance(value, int) and abs(value) > 2**53 - 1:
-                return str(value)
-            if isinstance(value, dict):
-                return {k: safe(v) for k, v in value.items()}
-            if isinstance(value, list):
-                return [safe(v) for v in value]
-            return value
-
-        item["raw"] = safe(item["raw"])
-        return item
-
-    async def _index(self, generation, ident):
-        await self.conn.execute(
-            "DELETE FROM search_index WHERE generation=? AND image_id=?", (generation, str(ident))
+    @staticmethod
+    def _missing_annotation():
+        return or_(
+            Annotation.image_id.is_(None),
+            Annotation.image_key != CatalogImage.image_key,
+            Annotation.source_text != CatalogImage.text,
+            Annotation.prompt_version != PROMPT_VERSION,
         )
-        row = await self._one(
-            "SELECT * FROM images WHERE generation=? AND id=?", (generation, ident)
+
+    async def _index(self, session, generation, ident):
+        await session.execute(
+            delete(SearchEntry)
+            .where(SearchEntry.generation == generation, SearchEntry.image_id == str(ident))
+            .execution_options(synchronize_session=False)
         )
+        row = (
+            await session.execute(
+                self._image_query().where(
+                    CatalogImage.generation == generation, CatalogImage.id == ident
+                )
+            )
+        ).first()
         if row:
-            item = await self._view(row)
-            await self.conn.execute(
-                "INSERT INTO search_index VALUES(?,?,?,?,?,?)",
-                (
-                    generation,
-                    str(ident),
-                    tokenize(item["text"]),
-                    tokenize(
-                        " ".join(x for x in item["manual_tags"] if x not in item["excluded_tags"])
-                    ),
-                    tokenize(" ".join(item["effective_tags"])),
-                    tokenize(item["description"]),
-                ),
+            item = image_view(*row)
+            await session.execute(
+                insert(SearchEntry),
+                [
+                    {
+                        "generation": generation,
+                        "image_id": str(ident),
+                        "text": tokenize(item["text"]),
+                        "manual_tags": tokenize(
+                            " ".join(
+                                tag
+                                for tag in item["manual_tags"]
+                                if tag not in item["excluded_tags"]
+                            )
+                        ),
+                        "tags": tokenize(" ".join(item["effective_tags"])),
+                        "description": tokenize(item["description"]),
+                    }
+                ],
             )
 
-    async def _put(self, generation, raw, ident=None):
+    async def _put(self, session, generation, raw, ident=None):
         item = normalize_image(raw) if raw is not None else None
         ident = item["id"] if item else ident
         if item is None:
             if ident is not None:
-                await self.conn.execute(
-                    "DELETE FROM images WHERE generation=? AND id=?", (generation, ident)
+                await session.execute(
+                    delete(CatalogImage).where(
+                        CatalogImage.generation == generation, CatalogImage.id == ident
+                    )
                 )
-                await self._index(generation, ident)
+                await self._index(session, generation, ident)
             return
-        await self.conn.execute(
-            "INSERT OR REPLACE INTO images VALUES(?,?,?,?,?,?,?,?)",
-            (
-                generation,
-                item["id"],
-                item["text"],
-                item["rating"],
-                item["image_url"],
-                item["image_key"],
-                dump(item["hub_tags"]),
-                dump(raw),
-            ),
-        )
-        await self._index(generation, item["id"])
+        await session.merge(CatalogImage(generation=generation, **item))
+        await self._index(session, generation, ident)
 
     async def stage_batch(self, generation, records):
-        async with self.lock:
-            try:
-                for record in records:
-                    await self._put(generation, record)
-                await self.conn.commit()
-            except BaseException:
-                await self.conn.rollback()
-                raise
+        async with self.transaction() as session:
+            for record in records:
+                await self._put(session, generation, record)
+
+    @staticmethod
+    async def _acknowledge(session, receipts):
+        if receipts:
+            await session.execute(
+                update(Notification)
+                .where(Notification.id.in_(receipts))
+                .values(processed=True, error=None)
+            )
+
+    @staticmethod
+    async def _remove_other_generations(session, generation):
+        await session.execute(delete(CatalogImage).where(CatalogImage.generation != generation))
+        await session.execute(
+            delete(SearchEntry)
+            .where(SearchEntry.generation != generation)
+            .execution_options(synchronize_session=False)
+        )
+        await session.execute(delete(Generation).where(Generation.id != generation))
 
     async def publish(self, generation, summary, receipts):
-        async with self.lock:
-            try:
-                await self._set_meta("active_generation", generation)
-                await self._set_meta("last_sync", {**summary, "completed_at": time.time()})
-                await self.conn.execute(
-                    "UPDATE generations SET export_id=? WHERE id=?",
-                    (summary["export_id"], generation),
-                )
-                await self.conn.executemany(
-                    "UPDATE notifications SET processed=1,error=NULL WHERE id=?",
-                    [(x,) for x in receipts],
-                )
-                await self.conn.commit()
-                self.catalog_revision += 1
-            except BaseException:
-                await self.conn.rollback()
-                raise
-            # Separate cleanup: a crash here still leaves a valid active generation.
-            await self.conn.execute("DELETE FROM images WHERE generation != ?", (generation,))
-            await self.conn.execute("DELETE FROM search_index WHERE generation != ?", (generation,))
-            await self.conn.execute("DELETE FROM generations WHERE id != ?", (generation,))
-            await self.conn.commit()
+        async with self.transaction() as session:
+            await self._set_meta(session, "active_generation", generation)
+            await self._set_meta(session, "last_sync", {**summary, "completed_at": time.time()})
+            await session.execute(
+                update(Generation)
+                .where(Generation.id == generation)
+                .values(export_id=summary["export_id"])
+            )
+            await self._acknowledge(session, receipts)
+        self.catalog_revision += 1
+        # A failure during cleanup still leaves a committed, valid active generation.
+        async with self.transaction() as session:
+            await self._remove_other_generations(session, generation)
 
     async def discard(self, generation):
-        async with self.lock:
-            if await self._meta("active_generation") == generation:
+        async with self.transaction() as session:
+            if await self._meta(session, "active_generation") == generation:
                 return
-            for table in ("images", "search_index"):
-                await self.conn.execute(f"DELETE FROM {table} WHERE generation=?", (generation,))
-            await self.conn.execute("DELETE FROM generations WHERE id=?", (generation,))
-            await self.conn.commit()
+            await session.execute(delete(CatalogImage).where(CatalogImage.generation == generation))
+            await session.execute(
+                delete(SearchEntry)
+                .where(SearchEntry.generation == generation)
+                .execution_options(synchronize_session=False)
+            )
+            await session.execute(delete(Generation).where(Generation.id == generation))
 
     async def refresh(self, generation, ident, raw, receipts=()):
-        async with self.lock:
-            try:
-                await self._put(generation, raw, ident)
-                await self.conn.executemany(
-                    "UPDATE notifications SET processed=1,error=NULL WHERE id=?",
-                    [(x,) for x in receipts],
-                )
-                await self.conn.commit()
-                self.catalog_revision += 1
-            except BaseException:
-                await self.conn.rollback()
-                raise
+        async with self.transaction() as session:
+            await self._put(session, generation, raw, ident)
+            await self._acknowledge(session, receipts)
+        self.catalog_revision += 1
 
     async def get_image(self, ident):
-        async with self.lock:
-            generation = await self._meta("active_generation")
-            row = await self._one(
-                "SELECT * FROM images WHERE generation=? AND id=?", (generation, ident)
-            )
-            return await self._view(row) if row else None
+        async with self.transaction() as session:
+            generation = await self._meta(session, "active_generation")
+            row = (
+                await session.execute(
+                    self._image_query().where(
+                        CatalogImage.generation == generation, CatalogImage.id == ident
+                    )
+                )
+            ).first()
+            return image_view(*row) if row else None
 
     async def update_override(self, ident, values):
-        async with self.lock:
-            try:
-                await self.conn.execute(
-                    "INSERT OR IGNORE INTO overrides(image_id) VALUES(?)", (ident,)
+        async with self.transaction() as session:
+            override = await session.get(Override, ident)
+            if override is None:
+                override = Override(image_id=ident)
+                session.add(override)
+            for key in ("manual_tags", "excluded_tags", "description", "enabled"):
+                if key in values:
+                    setattr(override, key, values[key])
+            generations = (
+                await session.scalars(
+                    select(CatalogImage.generation).where(CatalogImage.id == ident)
                 )
-                for key in ("manual_tags", "excluded_tags", "description", "enabled"):
-                    if key in values:
-                        value = values[key]
-                        if key.endswith("tags"):
-                            value = dump(value)
-                        await self.conn.execute(
-                            f"UPDATE overrides SET {key}=? WHERE image_id=?", (value, ident)
-                        )
-                for row in await self._all("SELECT generation FROM images WHERE id=?", (ident,)):
-                    await self._index(row[0], ident)
-                await self.conn.commit()
-                self.catalog_revision += 1
-            except BaseException:
-                await self.conn.rollback()
-                raise
+            ).all()
+            for generation in generations:
+                await self._index(session, generation, ident)
+        self.catalog_revision += 1
 
     async def list_images(
         self,
@@ -372,94 +327,100 @@ class Database:
         recent=(),
         ratings=None,
     ):
-        async with self.lock:
-            generation = await self._meta("active_generation")
-            terms = tokenize(query[:1000]).split()
-            args = []
-            joins = "LEFT JOIN overrides o ON o.image_id=i.id LEFT JOIN annotations a ON a.image_id=i.id"
-            rank = "0.0"
-            if query.strip() and not terms:
-                return {"items": [], "total": 0, "page": page}
+        terms = tokenize(query[:1000]).split()
+        if query.strip() and not terms or ratings is not None and not ratings:
+            return {"items": [], "total": 0, "page": page}
+        async with self.transaction() as session:
+            generation = await self._meta(session, "active_generation")
+            statement = self._image_query().where(CatalogImage.generation == generation)
+            rank = None
             if terms:
-                joins += " JOIN search_index ON search_index.generation=i.generation AND search_index.image_id=CAST(i.id AS TEXT)"
-                rank = "bm25(search_index,0,0,6,8,4,2)"
-            where = ["i.generation=?"]
-            args.append(generation)
-            if terms:
-                where.append("search_index MATCH ?")
-                args.append(" OR ".join('"' + t.replace('"', '""') + '"' for t in terms[:80]))
+                fts = SearchEntry.__table__.table_valued()
+                statement = statement.join(
+                    SearchEntry,
+                    and_(
+                        SearchEntry.generation == CatalogImage.generation,
+                        SearchEntry.image_id == cast(CatalogImage.id, Text),
+                    ),
+                ).where(
+                    type_coerce(fts, Text).match(
+                        " OR ".join('"' + term.replace('"', '""') + '"' for term in terms[:80])
+                    )
+                )
+                rank = func.bm25(fts, 0, 0, 6, 8, 4, 2)
             if rating:
-                where.append("i.rating=?")
-                args.append(rating)
+                statement = statement.where(CatalogImage.rating == rating)
             if ratings is not None:
-                if not ratings:
-                    return {"items": [], "total": 0, "page": page}
-                where.append("i.rating IN (" + ",".join("?" for _ in ratings) + ")")
-                args.extend(ratings)
+                statement = statement.where(CatalogImage.rating.in_(ratings))
             if annotation == "missing":
-                where.append(
-                    "(a.image_id IS NULL OR a.image_key!=i.image_key OR a.source_text!=i.text OR a.prompt_version!=?)"
-                )
-                args.append(PROMPT_VERSION)
+                statement = statement.where(self._missing_annotation())
             if enabled in ("true", "false"):
-                where.append("COALESCE(o.enabled,1)=?")
-                args.append(int(enabled == "true"))
-            clause = " AND ".join(where)
-            total = (
-                await self._one(f"SELECT count(*) FROM images i {joins} WHERE {clause}", args)
-            )[0]
-            # Penalize recent sends without excluding them from an explicit search.
-            recent_ids = [int(x) for x in recent][-20:]
-            penalty = "0.0"
-            if recent_ids:
-                penalty = (
-                    "CASE WHEN i.id IN ("
-                    + ",".join("?" for _ in recent_ids)
-                    + ") THEN 1 ELSE 0 END"
+                statement = statement.where(
+                    func.coalesce(Override.enabled, True) == (enabled == "true")
                 )
-            rows = await self._all(
-                f"SELECT i.* FROM images i {joins} WHERE {clause} ORDER BY {penalty},{rank},i.id DESC LIMIT ? OFFSET ?",
-                [*args, *recent_ids, limit, (page - 1) * limit],
+            total = await session.scalar(
+                statement.with_only_columns(func.count(), maintain_column_froms=True)
             )
-            return {"items": [await self._view(row) for row in rows], "total": total, "page": page}
+            recent_ids = [int(ident) for ident in recent][-20:]
+            order = []
+            if recent_ids:
+                order.append(case((CatalogImage.id.in_(recent_ids), 1), else_=0))
+            if rank is not None:
+                order.append(rank)
+            order.append(CatalogImage.id.desc())
+            rows = (
+                await session.execute(
+                    statement.order_by(*order).limit(limit).offset((page - 1) * limit)
+                )
+            ).all()
+            return {"items": [image_view(*row) for row in rows], "total": total, "page": page}
 
     async def search(self, query, limit, ratings=RATINGS, recent=()):
-        # Filter in SQL before LIMIT, so excluded ratings cannot hide valid candidates.
         result = await self.list_images(
             query=query, limit=limit, enabled="true", recent=recent, ratings=ratings
         )
         return result["items"]
 
     async def semantic_catalog(self, ratings=RATINGS, ids=None, *, include_disabled=False):
-        """One consistent bulk read; no per-image annotation/override queries."""
         if not ratings or ids == []:
             return []
-        async with self.lock:
-            generation = await self._meta("active_generation")
-            where = "i.generation=? AND i.rating IN (" + ",".join("?" for _ in ratings) + ")"
-            args = [generation, *ratings]
-            if not include_disabled:
-                where += " AND COALESCE(o.enabled,1)=1"
-            if ids is not None:
-                where += " AND i.id IN (" + ",".join("?" for _ in ids) + ")"
-                args.extend(int(ident) for ident in ids)
-            rows = await self._all(
-                f"""SELECT i.id,i.text,i.rating,i.image_key,i.hub_tags,
-                COALESCE(o.enabled,1) AS enabled,
-                COALESCE(o.manual_tags,'[]') AS manual_tags,
-                COALESCE(o.excluded_tags,'[]') AS excluded_tags,o.description AS manual_description,
-                a.image_key AS ai_image_key,a.source_text AS ai_source_text,
-                a.prompt_version,a.description AS ai_description,a.tags AS ai_tags
-                FROM images i LEFT JOIN overrides o ON o.image_id=i.id
-                LEFT JOIN annotations a ON a.image_id=i.id WHERE {where} ORDER BY i.id""",
-                args,
+        async with self.transaction() as session:
+            generation = await self._meta(session, "active_generation")
+            statement = (
+                select(CatalogImage, Override, Annotation)
+                .outerjoin(Override, Override.image_id == CatalogImage.id)
+                .outerjoin(Annotation, Annotation.image_id == CatalogImage.id)
+                .where(CatalogImage.generation == generation, CatalogImage.rating.in_(ratings))
+                .order_by(CatalogImage.id)
             )
-            return [dict(row) for row in rows]
+            if not include_disabled:
+                statement = statement.where(func.coalesce(Override.enabled, True).is_(True))
+            if ids is not None:
+                statement = statement.where(CatalogImage.id.in_(int(ident) for ident in ids))
+            result = []
+            for image, override, annotation in (await session.execute(statement)).all():
+                result.append(
+                    {
+                        "id": image.id,
+                        "text": image.text,
+                        "rating": image.rating,
+                        "image_key": image.image_key,
+                        "hub_tags": image.hub_tags,
+                        "enabled": override.enabled if override else True,
+                        "manual_tags": override.manual_tags if override else [],
+                        "excluded_tags": override.excluded_tags if override else [],
+                        "manual_description": override.description if override else None,
+                        "ai_image_key": annotation.image_key if annotation else None,
+                        "ai_source_text": annotation.source_text if annotation else None,
+                        "prompt_version": annotation.prompt_version if annotation else None,
+                        "ai_description": annotation.description if annotation else None,
+                        "ai_tags": annotation.tags if annotation else [],
+                    }
+                )
+            return result
 
     async def query_sql(self, sql, limit=10, ratings=RATINGS):
         validate_query(sql, limit)
-        # An independent read snapshot keeps model queries off the live writer and
-        # event loop. Serialize copies to bound memory when tools run in parallel.
         async with self.query_lock:
             stop = Event()
             try:
@@ -470,232 +431,297 @@ class Database:
                 stop.set()
 
     async def missing_annotation_ids(self):
-        async with self.lock:
-            generation = await self._meta("active_generation")
-            rows = await self._all(
-                """SELECT i.id FROM images i LEFT JOIN annotations a ON a.image_id=i.id
-                WHERE i.generation=? AND (a.image_id IS NULL OR a.image_key!=i.image_key
-                OR a.source_text!=i.text OR a.prompt_version!=?) ORDER BY i.id""",
-                (generation, PROMPT_VERSION),
+        async with self.transaction() as session:
+            generation = await self._meta(session, "active_generation")
+            return list(
+                await session.scalars(
+                    select(CatalogImage.id)
+                    .outerjoin(Annotation, Annotation.image_id == CatalogImage.id)
+                    .where(CatalogImage.generation == generation, self._missing_annotation())
+                    .order_by(CatalogImage.id)
+                )
             )
-            return [row[0] for row in rows]
 
     async def record_webhook(self, *, body, valid, status, event=None, ident=None, error=None):
-        async with self.lock:
-            try:
-                receipt = None
-                now = time.time()
-                if status == 204:
-                    cursor = await self.conn.execute(
-                        "INSERT INTO notifications(image_id,event,received) VALUES(?,?,?)",
-                        (ident, event, now),
-                    )
-                    receipt = cursor.lastrowid
-                    await cursor.close()
-                await self.conn.execute(
-                    "INSERT INTO webhook_logs(received,receipt_id,event,image_id,signature_valid,http_status,body,error) VALUES(?,?,?,?,?,?,?,?)",
-                    (
-                        now,
-                        receipt,
-                        event,
-                        str(ident) if ident else None,
-                        int(valid),
-                        status,
-                        body[:8192],
-                        error,
-                    ),
+        async with self.transaction() as session:
+            receipt = None
+            now = time.time()
+            if status == 204:
+                notification = Notification(image_id=ident, event=event, received=now)
+                session.add(notification)
+                await session.flush()
+                receipt = notification.id
+            session.add(
+                WebhookLog(
+                    received=now,
+                    receipt_id=receipt,
+                    event=event,
+                    image_id=str(ident) if ident else None,
+                    signature_valid=valid,
+                    http_status=status,
+                    body=body[:8192],
+                    error=error,
                 )
-                await self.conn.commit()
-                return receipt
-            except BaseException:
-                await self.conn.rollback()
-                raise
+            )
+            return receipt
 
     async def pending(self, *, all_pending=False):
-        async with self.lock:
-            due = "" if all_pending else " AND next_attempt<=?"
-            args = () if all_pending else (time.time(),)
-            rows = await self._all(
-                f"SELECT * FROM notifications WHERE processed=0{due} ORDER BY id", args
+        async with self.transaction() as session:
+            statement = (
+                select(Notification)
+                .where(Notification.processed.is_(False))
+                .order_by(Notification.id)
             )
+            if not all_pending:
+                statement = statement.where(Notification.next_attempt <= time.time())
+            rows = (await session.scalars(statement)).all()
             if not all_pending and rows:
-                rows = [r for r in rows if r["image_id"] == rows[0]["image_id"]]
-            return [dict(r) for r in rows]
+                rows = [row for row in rows if row.image_id == rows[0].image_id]
+            return [entity_dict(row) for row in rows]
 
     async def fail_receipts(self, receipts, error):
-        async with self.lock:
-            await self.conn.executemany(
-                "UPDATE notifications SET attempts=attempts+1,error=?,next_attempt=? WHERE id=?",
-                [
-                    (error, time.time() + min(300, 2 ** min(r["attempts"] + 1, 8)), r["id"])
-                    for r in receipts
-                ],
-            )
-            await self.conn.commit()
+        async with self.transaction() as session:
+            for receipt in receipts:
+                await session.execute(
+                    update(Notification)
+                    .where(Notification.id == receipt["id"])
+                    .values(
+                        attempts=Notification.attempts + 1,
+                        error=error,
+                        next_attempt=time.time() + min(300, 2 ** min(receipt["attempts"] + 1, 8)),
+                    )
+                )
 
     async def retry_notifications(self):
-        async with self.lock:
-            await self.conn.execute("UPDATE notifications SET next_attempt=0 WHERE processed=0")
-            await self.conn.commit()
+        async with self.transaction() as session:
+            await session.execute(
+                update(Notification).where(Notification.processed.is_(False)).values(next_attempt=0)
+            )
 
     async def logs(self, page=1, limit=30, event="", failed=False):
-        async with self.lock:
-            where, args = [], []
+        async with self.transaction() as session:
+            statement = select(
+                WebhookLog,
+                Notification.processed,
+                Notification.attempts,
+                Notification.error.label("processing_error"),
+            ).outerjoin(Notification, Notification.id == WebhookLog.receipt_id)
             if event:
-                where.append("l.event=?")
-                args.append(event)
+                statement = statement.where(WebhookLog.event == event)
             if failed:
-                where.append("(l.http_status!=204 OR n.error IS NOT NULL)")
-            clause = " WHERE " + " AND ".join(where) if where else ""
-            source = "FROM webhook_logs l LEFT JOIN notifications n ON n.id=l.receipt_id"
-            total = (await self._one(f"SELECT count(*) {source}{clause}", args))[0]
-            rows = await self._all(
-                f"SELECT l.*,n.processed,n.attempts,n.error AS processing_error {source}{clause} ORDER BY l.id DESC LIMIT ? OFFSET ?",
-                [*args, limit, (page - 1) * limit],
+                statement = statement.where(
+                    or_(WebhookLog.http_status != 204, Notification.error.is_not(None))
+                )
+            total = await session.scalar(
+                statement.with_only_columns(func.count(), maintain_column_froms=True)
             )
-            return {"items": [dict(r) for r in rows], "total": total, "page": page}
+            rows = (
+                await session.execute(
+                    statement.order_by(WebhookLog.id.desc()).limit(limit).offset((page - 1) * limit)
+                )
+            ).all()
+            return {
+                "items": [
+                    {
+                        **entity_dict(row[0]),
+                        "processed": row.processed,
+                        "attempts": row.attempts,
+                        "processing_error": row.processing_error,
+                    }
+                    for row in rows
+                ],
+                "total": total,
+                "page": page,
+            }
 
     async def prune_logs(self, days, limit):
-        async with self.lock:
-            await self.conn.execute(
-                "DELETE FROM webhook_logs WHERE received<? OR id NOT IN (SELECT id FROM webhook_logs ORDER BY id DESC LIMIT ?)",
-                (time.time() - days * 86400, limit),
+        async with self.transaction() as session:
+            keep = select(WebhookLog.id).order_by(WebhookLog.id.desc()).limit(limit)
+            await session.execute(
+                delete(WebhookLog).where(
+                    or_(
+                        WebhookLog.received < time.time() - days * 86400, WebhookLog.id.not_in(keep)
+                    )
+                )
             )
-            # Unprocessed notifications are durable work, independent of log retention.
-            await self.conn.execute(
-                "DELETE FROM notifications WHERE processed=1 AND id NOT IN (SELECT receipt_id FROM webhook_logs WHERE receipt_id IS NOT NULL)"
+            retained = select(WebhookLog.receipt_id).where(WebhookLog.receipt_id.is_not(None))
+            await session.execute(
+                delete(Notification).where(
+                    Notification.processed.is_(True), Notification.id.not_in(retained)
+                )
             )
-            await self.conn.commit()
 
     async def enqueue_tags(self, ids, *, force=False, provider_id=""):
         queued = 0
-        async with self.lock:
-            generation = await self._meta("active_generation")
+        async with self.transaction() as session:
+            generation = await self._meta(session, "active_generation")
             for ident in ids:
-                row = await self._one(
-                    "SELECT * FROM images WHERE generation=? AND id=?", (generation, ident)
-                )
+                row = (
+                    await session.execute(
+                        self._image_query().where(
+                            CatalogImage.generation == generation, CatalogImage.id == ident
+                        )
+                    )
+                ).first()
                 if not row:
                     continue
-                view = await self._view(row)
+                view = image_view(*row)
                 if (
                     not force
                     and view["annotation_fresh"]
                     and view["annotation_provider"] == provider_id
                 ):
                     continue
-                job = await self._one("SELECT status FROM tag_jobs WHERE image_id=?", (ident,))
-                if job and (job[0] in ("queued", "running") or (job[0] == "failed" and not force)):
+                job = row[3]
+                if job and (
+                    job.status in ("queued", "running") or job.status == "failed" and not force
+                ):
                     continue
-                await self.conn.execute(
-                    "INSERT OR REPLACE INTO tag_jobs(image_id,status,updated) VALUES(?,'queued',?)",
-                    (ident, time.time()),
+                await session.merge(
+                    TagJob(
+                        image_id=ident,
+                        status="queued",
+                        updated=time.time(),
+                        attempts=0,
+                        next_attempt=0,
+                        error=None,
+                        lease=None,
+                    )
                 )
                 queued += 1
-            await self.conn.commit()
         return queued
 
     async def claim_tag(self):
-        async with self.lock:
-            if await self._meta("tagging_paused"):
+        async with self.transaction() as session:
+            if await self._meta(session, "tagging_paused"):
                 return None
-            row = await self._one(
-                "SELECT * FROM tag_jobs WHERE status='queued' AND next_attempt<=? ORDER BY updated,image_id LIMIT 1",
-                (time.time(),),
+            job = await session.scalar(
+                select(TagJob)
+                .where(TagJob.status == "queued", TagJob.next_attempt <= time.time())
+                .order_by(TagJob.updated, TagJob.image_id)
+                .limit(1)
             )
-            if not row:
+            if job is None:
                 return None
-            lease = uuid.uuid4().hex
-            await self.conn.execute(
-                "UPDATE tag_jobs SET status='running',lease=? WHERE image_id=?",
-                (lease, row["image_id"]),
-            )
-            await self.conn.commit()
-            return {**dict(row), "lease": lease}
+            result = entity_dict(job)
+            job.status, job.lease = "running", uuid.uuid4().hex
+            return {**result, "lease": job.lease}
 
     async def finish_tag(self, job, image, result, provider_id):
-        async with self.lock, self._transaction():
-            current = await self._one(
-                "SELECT * FROM tag_jobs WHERE image_id=? AND lease=?",
-                (job["image_id"], job["lease"]),
+        async with self.transaction() as session:
+            current = await session.scalar(
+                select(TagJob).where(
+                    TagJob.image_id == job["image_id"], TagJob.lease == job["lease"]
+                )
             )
-            if not current:
+            if current is None:
                 return
-            generation = await self._meta("active_generation")
-            row = await self._one(
-                "SELECT * FROM images WHERE generation=? AND id=?", (generation, job["image_id"])
-            )
-            if not row:
-                await self.conn.execute("DELETE FROM tag_jobs WHERE image_id=?", (job["image_id"],))
-            elif (
-                not image or row["text"] != image["text"] or row["image_key"] != image["image_key"]
-            ):
-                await self.conn.execute(
-                    "UPDATE tag_jobs SET status='queued',lease=NULL WHERE image_id=?",
-                    (job["image_id"],),
-                )
+            generation = await self._meta(session, "active_generation")
+            row = await session.get(CatalogImage, (generation, job["image_id"]))
+            if row is None:
+                await session.delete(current)
+            elif not image or row.text != image["text"] or row.image_key != image["image_key"]:
+                current.status, current.lease = "queued", None
             else:
-                await self.conn.execute(
-                    "INSERT OR REPLACE INTO annotations VALUES(?,?,?,?,?,?,?,?)",
-                    (
-                        job["image_id"],
-                        image["image_key"],
-                        image["text"],
-                        provider_id,
-                        PROMPT_VERSION,
-                        result["description"],
-                        dump(result["tags"]),
-                        time.time(),
-                    ),
+                await session.merge(
+                    Annotation(
+                        image_id=job["image_id"],
+                        image_key=image["image_key"],
+                        source_text=image["text"],
+                        provider_id=provider_id,
+                        prompt_version=PROMPT_VERSION,
+                        description=result["description"],
+                        tags=result["tags"],
+                        updated=time.time(),
+                    )
                 )
-                await self.conn.execute(
-                    "UPDATE tag_jobs SET status='done',error=NULL,lease=NULL,updated=? WHERE image_id=?",
-                    (time.time(), job["image_id"]),
+                current.status, current.error, current.lease, current.updated = (
+                    "done",
+                    None,
+                    None,
+                    time.time(),
                 )
-                for gen in await self._all(
-                    "SELECT generation FROM images WHERE id=?", (job["image_id"],)
-                ):
-                    await self._index(gen[0], job["image_id"])
+                generations = (
+                    await session.scalars(
+                        select(CatalogImage.generation).where(CatalogImage.id == job["image_id"])
+                    )
+                ).all()
+                for current_generation in generations:
+                    await self._index(session, current_generation, job["image_id"])
         self.catalog_revision += 1
 
     async def fail_tag(self, job, error):
-        async with self.lock:
+        async with self.transaction() as session:
             attempts = job["attempts"] + 1
-            await self.conn.execute(
-                "UPDATE tag_jobs SET status=?,attempts=?,error=?,lease=NULL,next_attempt=?,updated=? WHERE image_id=? AND lease=?",
-                (
-                    "failed" if attempts >= 3 else "queued",
-                    attempts,
-                    error,
-                    time.time() + min(300, 10 * 2**attempts),
-                    time.time(),
-                    job["image_id"],
-                    job["lease"],
-                ),
-            )
-            await self.conn.commit()
-
-    async def stats(self):
-        async with self.lock:
-            generation = await self._meta("active_generation")
-            counts = dict(
-                await self._all(
-                    "SELECT rating,count(*) FROM images WHERE generation=? GROUP BY rating",
-                    (generation,),
+            await session.execute(
+                update(TagJob)
+                .where(TagJob.image_id == job["image_id"], TagJob.lease == job["lease"])
+                .values(
+                    status="failed" if attempts >= 3 else "queued",
+                    attempts=attempts,
+                    error=error,
+                    lease=None,
+                    next_attempt=time.time() + min(300, 10 * 2**attempts),
+                    updated=time.time(),
                 )
             )
-            pending = (await self._one("SELECT count(*) FROM notifications WHERE processed=0"))[0]
-            jobs = dict(await self._all("SELECT status,count(*) FROM tag_jobs GROUP BY status"))
-            queue = await self._all(
-                """SELECT j.image_id,i.text,j.status,j.attempts,j.next_attempt
-                FROM tag_jobs j JOIN images i ON i.id=j.image_id AND i.generation=?
-                WHERE j.status IN ('running','queued')
-                ORDER BY CASE j.status WHEN 'running' THEN 0 ELSE 1 END,
-                    CASE WHEN j.next_attempt>? THEN 1 ELSE 0 END,j.updated,j.image_id LIMIT 5""",
-                (generation, time.time()),
+
+    async def stats(self):
+        async with self.transaction() as session:
+            generation = await self._meta(session, "active_generation")
+            counts = dict(
+                (
+                    await session.execute(
+                        select(CatalogImage.rating, func.count())
+                        .where(CatalogImage.generation == generation)
+                        .group_by(CatalogImage.rating)
+                    )
+                ).all()
             )
-            last_hook = await self._one(
-                "SELECT max(received) FROM webhook_logs WHERE http_status=204"
+            pending = await session.scalar(
+                select(func.count())
+                .select_from(Notification)
+                .where(Notification.processed.is_(False))
+            )
+            jobs = dict(
+                (
+                    await session.execute(
+                        select(TagJob.status, func.count()).group_by(TagJob.status)
+                    )
+                ).all()
+            )
+            queue = (
+                (
+                    await session.execute(
+                        select(
+                            TagJob.image_id,
+                            CatalogImage.text,
+                            TagJob.status,
+                            TagJob.attempts,
+                            TagJob.next_attempt,
+                        )
+                        .join(
+                            CatalogImage,
+                            and_(
+                                CatalogImage.id == TagJob.image_id,
+                                CatalogImage.generation == generation,
+                            ),
+                        )
+                        .where(TagJob.status.in_(["running", "queued"]))
+                        .order_by(
+                            case((TagJob.status == "running", 0), else_=1),
+                            case((TagJob.next_attempt > time.time(), 1), else_=0),
+                            TagJob.updated,
+                            TagJob.image_id,
+                        )
+                        .limit(5)
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            last_hook = await session.scalar(
+                select(func.max(WebhookLog.received)).where(WebhookLog.http_status == 204)
             )
             return {
                 "generation": generation,
@@ -703,9 +729,9 @@ class Database:
                 "ratings": counts,
                 "pending_notifications": pending,
                 "tag_jobs": jobs,
-                "tag_queue": [{**dict(row), "image_id": str(row["image_id"])} for row in queue],
-                "tagging_auto": bool(await self._meta("tagging_auto")),
-                "tagging_paused": bool(await self._meta("tagging_paused")),
-                "last_sync": await self._meta("last_sync"),
-                "last_webhook": last_hook[0],
+                "tag_queue": [{**row, "image_id": str(row["image_id"])} for row in queue],
+                "tagging_auto": bool(await self._meta(session, "tagging_auto")),
+                "tagging_paused": bool(await self._meta(session, "tagging_paused")),
+                "last_sync": await self._meta(session, "last_sync"),
+                "last_webhook": last_hook,
             }

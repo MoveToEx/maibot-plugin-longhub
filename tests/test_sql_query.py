@@ -4,6 +4,7 @@ import json
 import pytest
 
 from backend.models import PROMPT_VERSION
+from backend.orm import Annotation
 from tests.conftest import publish
 
 
@@ -30,11 +31,19 @@ async def test_sql_exact_text_tag_intersection_and_exclusion(db, image):
 async def test_sql_effective_tags_descriptions_json_and_big_ids(db, image):
     ident = 2**63 - 1
     await publish(db, [image(ident, tag_names=["龙", "错误", "重复"])])
-    await db.conn.execute(
-        "INSERT INTO annotations VALUES(?,?,?,?,?,?,?,?)",
-        (ident, f"{ident}.gif", "确实", "vision", PROMPT_VERSION, "AI描述", '["AI","重复"]', 0),
-    )
-    await db.conn.commit()
+    async with db.transaction() as session:
+        session.add(
+            Annotation(
+                image_id=ident,
+                image_key=f"{ident}.gif",
+                source_text="确实",
+                provider_id="vision",
+                prompt_version=PROMPT_VERSION,
+                description="AI描述",
+                tags=["AI", "重复"],
+                updated=0,
+            )
+        )
     await db.update_override(
         ident,
         {"manual_tags": ["人工", "重复"], "excluded_tags": ["错误"], "description": "人工描述"},
