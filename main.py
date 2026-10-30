@@ -20,6 +20,13 @@ from astrbot.api.web import error_response, json_response, request
 from astrbot.core.platform.astr_message_event import streaming_response_event
 from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 
+from .backend.delivery import (
+    DeliveryUnconfirmed,
+    authorize_companion_image,
+    bind_companion_sender,
+    companion_block_reason,
+    companion_context,
+)
 from .backend.models import RATINGS, Settings, tags
 from .backend.models import image_id as parse_image_id
 from .backend.service import Service
@@ -32,7 +39,7 @@ CONTEXT_MEME_PROMPT = "请根据当前会话上下文、最近话题和情绪，
 SEMANTIC_TOOL = "search_longhub_memes_semantic"
 
 
-@register(PLUGIN_NAME, "MoveToEx", "LONG Hub 同步表情目录", "0.5.0")
+@register(PLUGIN_NAME, "MoveToEx", "LONG Hub 同步表情目录", "0.5.1")
 class LongHubPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -325,20 +332,28 @@ class LongHubPlugin(Star):
 
     def _wrap_streaming(self, event):
         self._track_delivery(event)
-        if event.get_extra("longhub_stream_wrapped"):
-            return
-        original = event.send_streaming
+        bind_companion_sender(
+            event, "send_streaming", lambda send: self._stream_sender(event, send)
+        )
+        event.send_streaming = self._stream_sender(event, event.send_streaming)
+
+    def _stream_sender(self, event, original):
+        if getattr(original, "_longhub_stream_event_id", None) == id(event):
+            return original
 
         async def observe(stream):
             async for message in self._filter_image_only_stream(event, stream):
                 if self._reply_text(message):
-                    # Native streaming adapters may bypass event.send or buffer
-                    # until this generator ends. This means submitted, not delivered.
+                    # Submitted to a possibly buffered adapter, not yet delivered.
                     event.set_extra("longhub_stream_text_started", True)
                 yield message
 
         @wraps(original)
         async def send_streaming(stream, *args, **kwargs):
+            # Both the event and Companion's captured callback can be wrapped.
+            # Only the outer active call filters chunks and flushes the image.
+            if event.get_extra("longhub_streaming_active"):
+                return await original(stream, *args, **kwargs)
             event.set_extra("longhub_streaming_active", True)
             try:
                 result = await original(observe(stream), *args, **kwargs)
@@ -347,7 +362,7 @@ class LongHubPlugin(Star):
                 raise
             finally:
                 event.set_extra("longhub_streaming_active", False)
-            # Streaming adapters may flush buffered text only when this await returns.
+            # Adapters may flush buffered text only when this await returns.
             token = streaming_response_event.set(None)
             try:
                 await self._flush_after(event)
@@ -355,9 +370,73 @@ class LongHubPlugin(Star):
                 streaming_response_event.reset(token)
             return result
 
-        # Wrap only this inbound event, without changing the adapter or framework class.
-        event.send_streaming = send_streaming
-        event.set_extra("longhub_stream_wrapped", True)
+        send_streaming._longhub_stream_event_id = id(event)
+        return send_streaming
+
+    @filter.on_decorating_result(priority=-2000000)
+    async def rearm_meme_delivery(self, event: AstrMessageEvent):
+        # Run after Companion's -1000000 decorators have rebuilt their wrappers.
+        # Captured callbacks also cover streams which skip result decorators.
+        self._wrap_streaming(event)
+
+    def _send_sender(self, event, original, *, boundary=False):
+        if getattr(original, "_longhub_delivery_event_id", None) == id(event):
+            tracking = getattr(original, "_longhub_delivery_tracking", None)
+            if boundary and isinstance(tracking, dict):
+                tracking["boundary"] = True
+            return original
+        tracking = {"boundary": boundary}
+
+        @wraps(original)
+        async def send(message, *args, **kwargs):
+            receipt = event.get_extra("longhub_delivery")
+            # Snapshot identity/text before the adapter mutates message.chain.
+            matches = receipt is not None and any(
+                comp is receipt["image"] for comp in (getattr(message, "chain", None) or [])
+            )
+            if matches:
+                if receipt.get("confirmed"):
+                    return None
+                receipt["attempted"] = True
+                if self._reply_cancelled(event):
+                    raise DeliveryUnconfirmed("本轮回复已取消")
+                if reason := companion_block_reason(event):
+                    raise DeliveryUnconfirmed(reason)
+            guarded = companion_context(event) is not None and not tracking["boundary"]
+            if companion_context(event) is not None:
+                bound = bind_companion_sender(
+                    event, "send", lambda send: self._send_sender(event, send, boundary=True)
+                )
+                if matches and not bound:
+                    raise DeliveryUnconfirmed("陪伴插件发送接口已变化，无法核验图片送达")
+            if matches and tracking["boundary"]:
+                await authorize_companion_image(event)
+            text = self._reply_text(message)
+            result = await original(message, *args, **kwargs)
+            # An outer guard may return None after dropping a message. Only its
+            # captured platform callback can acknowledge our exact image.
+            if guarded:
+                if matches and not receipt.get("confirmed"):
+                    raise DeliveryUnconfirmed("图片未获得发送确认，本轮不要重复发送")
+                return result
+            if result is False:
+                if matches:
+                    raise DeliveryUnconfirmed("平台未接受图片发送")
+                return result
+            self._record_reply_text(event, text)
+            if matches:
+                await self._record_meme(event, receipt)
+            return result
+
+        send._longhub_delivery_event_id = id(event)
+        send._longhub_delivery_tracking = tracking
+        return send
+
+    def _track_delivery(self, event):
+        bind_companion_sender(
+            event, "send", lambda send: self._send_sender(event, send, boundary=True)
+        )
+        event.send = self._send_sender(event, event.send)
 
     async def _image_component(self, service, ident, event):
         item = await service.db.get_image(ident)
@@ -371,6 +450,8 @@ class LongHubPlugin(Star):
         image = Image.fromBytes(data)
         receipt = {
             "id": uuid.uuid4().hex,
+            "attempted": False,
+            "confirmed": False,
             "image": image,
             "service": service,
             "scope": event.get_extra("longhub_conversation_scope"),
@@ -385,34 +466,10 @@ class LongHubPlugin(Star):
         self._track_delivery(event)
         return image
 
-    def _track_delivery(self, event):
-        if getattr(event.send, "_longhub_delivery_event_id", None) == id(event):
-            return
-        original = event.send
-
-        @wraps(original)
-        async def send(message, *args, **kwargs):
-            receipt = event.get_extra("longhub_delivery")
-            # Check before the adapter can transform the chain. Unrelated text,
-            # other plugins' images and failed sends must never confirm this image.
-            matches = receipt is not None and any(
-                comp is receipt["image"] for comp in message.chain
-            )
-            text = self._reply_text(message)
-            result = await original(message, *args, **kwargs)
-            self._record_reply_text(event, text)
-            if matches:
-                await self._record_meme(event, receipt)
-            return result
-
-        # wraps() carries this marker through cooperative wrappers from other
-        # plugins; replacing send entirely lets us install a tracker again.
-        send._longhub_delivery_event_id = id(event)
-        event.send = send
-
     async def _record_meme(self, event, receipt):
         if event.get_extra("longhub_delivery_confirmed"):
             return
+        receipt["confirmed"] = True
         event.set_extra("longhub_delivery_confirmed", True)
         event.set_extra("longhub_sent", True)
         service = receipt["service"]
@@ -468,10 +525,12 @@ class LongHubPlugin(Star):
                 if self._reply_cancelled(event):
                     return
                 await event.send(MessageChain([image]))
+                if not event.get_extra("longhub_delivery").get("confirmed"):
+                    raise DeliveryUnconfirmed("图片未获得发送确认，本轮不要重复发送")
             except Exception as exc:
                 logger.warning("LONG Hub 文字后发图失败：%s", service.settings.redact(exc))
 
-    @filter.on_agent_begin()
+    @filter.on_agent_begin(priority=-2000000)
     async def prepare_meme_order(self, event: AstrMessageEvent, run_context):
         if event.get_extra("longhub_root_agent") is None:
             event.set_extra("longhub_root_agent", id(run_context))
@@ -855,12 +914,19 @@ class LongHubPlugin(Star):
         self._track_delivery(event)
         async with self._send_lock(event):
             if event.get_extra("longhub_sent"):
-                return "本轮已发送一张表情。" + self._reply_completion_hint(event, position)
+                if event.get_extra("longhub_delivery_confirmed"):
+                    return "本轮已发送一张表情。" + self._reply_completion_hint(event, position)
+                return "本轮图片已交给发送流程，尚未确认送达，不要重复发送。"
+            receipt = event.get_extra("longhub_delivery")
+            if receipt and receipt.get("attempted"):
+                return "本轮图片发送未确认，不要再次调用发图工具。"
             if event.get_extra("longhub_pending_after") is not None:
                 return "本轮已安排一张表情。" + self._reply_completion_hint(event, "after")
             try:
                 if position not in ("before", "after"):
                     raise ValueError("position 只能是 before 或 after")
+                if reason := companion_block_reason(event):
+                    return "本轮未发送表情：" + reason + "。"
                 ident = parse_image_id(image_id)
                 item = await service.db.get_image(ident)
                 if (
@@ -877,6 +943,8 @@ class LongHubPlugin(Star):
                     return "本轮回复已取消，未发送表情。"
                 # AstrBot owns any temporary media conversion and its cleanup.
                 await event.send(MessageChain([image]))
+                if not event.get_extra("longhub_delivery").get("confirmed"):
+                    raise DeliveryUnconfirmed("图片未获得发送确认，本轮不要重复发送")
                 details = json.dumps(
                     event.get_extra("longhub_delivery")["details"], ensure_ascii=False
                 )

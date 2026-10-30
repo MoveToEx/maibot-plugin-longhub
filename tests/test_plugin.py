@@ -84,6 +84,7 @@ def plugin_module(monkeypatch, tmp_path):
             on_agent_begin=decorator,
             on_agent_done=decorator,
             after_message_sent=decorator,
+            on_decorating_result=decorator,
         ),
     )
     module("astrbot.api.message_components", Image=Image, Plain=Plain, At=At, Reply=Reply)
