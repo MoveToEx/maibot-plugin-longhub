@@ -23,7 +23,9 @@ export function Button({
   type = 'button',
   onClick,
   ...props
-}: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: 'primary' | 'secondary' | 'ghost' }) {
+}: ButtonHTMLAttributes<HTMLButtonElement> & {
+  variant?: 'primary' | 'secondary' | 'ghost' | 'danger';
+}) {
   return (
     <BaseButton
       type={type}

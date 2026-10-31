@@ -1,6 +1,6 @@
 # LONG Hub · MaiBot 龙图插件
 
-此分支将 AstrBot LONG Hub 插件迁移到 MaiBot，版本 **0.6.2**。原 AstrBot 0.5.1 代码保留在 `main` 分支。当前分支的安装入口为 `plugin.py`，发行 ZIP 只包含 MaiBot 运行所需文件。
+此分支将 AstrBot LONG Hub 插件迁移到 MaiBot，版本 **0.6.3**。原 AstrBot 0.5.1 代码保留在 `main` 分支。当前分支的安装入口为 `plugin.py`，发行 ZIP 只包含 MaiBot 运行所需文件。
 
 同步 LONG Hub 目录、补全视觉标注，通过语义、标签 SQL 或文字寻找表情。图片从 S3 兼容的 R2 存储按需读取，发送、GIF 抽帧和 WebUI 缩略图均在内存中处理，不创建本地图片库。
 

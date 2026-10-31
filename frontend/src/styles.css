@@ -172,6 +172,13 @@ pre {
   .button-ghost {
     @apply bg-transparent border-transparent text-muted hover:bg-soft hover:text-ink shadow-none;
   }
+  .button-danger {
+    @apply border-transparent text-white;
+    background: #b7354a;
+  }
+  .button-danger:hover {
+    background: #9f293c;
+  }
   .icon-button {
     @apply inline-flex items-center justify-center size-8 p-0 rounded-lg text-muted border-0 bg-transparent hover:bg-soft hover:text-ink;
   }
@@ -304,6 +311,15 @@ pre {
   }
   .task-icon-button {
     @apply inline-flex items-center justify-center size-8 rounded-lg border border-line bg-surface text-muted hover:bg-soft hover:text-ink disabled:opacity-40 disabled:pointer-events-none;
+  }
+  .task-icon-button.task-icon-button-danger {
+    color: var(--danger);
+    border-color: color-mix(in srgb, var(--danger) 30%, var(--app-line));
+    background: color-mix(in srgb, var(--danger) 8%, var(--app-surface));
+  }
+  .task-icon-button.task-icon-button-danger:hover {
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 15%, var(--app-surface));
   }
   .detail-row {
     @apply flex justify-between items-start gap-5 py-3 text-xs border-b border-line last:border-0;

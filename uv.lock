@@ -405,7 +405,7 @@ wheels = [
 
 [[package]]
 name = "maibot-plugin-longhub"
-version = "0.6.2"
+version = "0.6.3"
 source = { virtual = "." }
 dependencies = [
     { name = "aiohttp" },

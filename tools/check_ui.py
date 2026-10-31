@@ -419,8 +419,36 @@ async def check(*, maibot=False, sandbox_only=False):
                     "window.__calls.some(x=>x.path==='tagging/enqueue'&&x.body.force===true)"
                 )
                 await page.locator("#rebuild-semantic").click()
-                await page.wait_for_function(
+                reset_dialog = page.get_by_role("dialog", name="重置向量索引？", exact=True)
+                await expect(reset_dialog).to_be_visible()
+                assert not await page.evaluate(
                     "window.__calls.some(x=>x.method==='POST'&&x.path==='semantic/rebuild')"
+                )
+                await reset_dialog.get_by_role("button", name="取消", exact=True).click()
+                await expect(reset_dialog).to_have_count(0)
+                assert not await page.evaluate(
+                    "window.__calls.some(x=>x.method==='POST'&&x.path==='semantic/rebuild')"
+                )
+                await page.locator("#rebuild-semantic").click()
+                await page.keyboard.press("Escape")
+                await expect(reset_dialog).to_have_count(0)
+                assert not await page.evaluate(
+                    "window.__calls.some(x=>x.method==='POST'&&x.path==='semantic/rebuild')"
+                )
+                await expect(page.locator("#rebuild-semantic")).to_have_css(
+                    "color", "rgb(193, 83, 97)"
+                )
+                await page.locator("#rebuild-semantic").click()
+                await expect(
+                    reset_dialog.get_by_role("button", name="确认重置", exact=True)
+                ).to_have_css("background-color", "rgb(183, 53, 74)")
+                await reset_dialog.get_by_role("button", name="确认重置", exact=True).click()
+                await expect(reset_dialog).to_have_count(0)
+                assert (
+                    await page.evaluate(
+                        "window.__calls.filter(x=>x.method==='POST'&&x.path==='semantic/rebuild').length"
+                    )
+                    == 1
                 )
                 await expect(page.locator("#embedding-progress canvas")).to_have_attribute(
                     "aria-label", "Embedding 进度：待向量化 49 张，已向量化 0 张"
@@ -468,6 +496,9 @@ async def check(*, maibot=False, sandbox_only=False):
                 )
                 await page.locator('[data-tab="tasks"]').click()
                 await expect(page.locator("#embedding-progress canvas")).to_be_visible()
+                await expect(page.locator("#rebuild-semantic")).to_have_css(
+                    "color", "rgb(229, 148, 160)"
+                )
                 await page.evaluate("document.documentElement.dataset.theme='light'")
                 await page.set_viewport_size({"width": 390, "height": 844})
                 for tab in ["overview", "catalog", "logs", "tasks", "settings"]:
@@ -529,6 +560,16 @@ async def check(*, maibot=False, sandbox_only=False):
                     await frame.locator("#pause-tagging").click()
                     await expect(frame.locator("#pause-tagging")).to_have_attribute(
                         "aria-label", "继续标注队列"
+                    )
+                    await frame.locator("#rebuild-semantic").click()
+                    frame_reset_dialog = frame.get_by_role(
+                        "dialog", name="重置向量索引？", exact=True
+                    )
+                    await expect(frame_reset_dialog).to_be_visible()
+                    await frame_reset_dialog.get_by_role("button", name="取消", exact=True).click()
+                    await expect(frame_reset_dialog).to_have_count(0)
+                    assert not await page.frames[1].evaluate(
+                        "window.__calls.some(x=>x.method==='POST'&&x.path==='semantic/rebuild')"
                     )
                 await frame.locator('[data-tab="overview"]').click()
                 await expect(frame.locator("#annotation-chart canvas")).to_be_visible()
