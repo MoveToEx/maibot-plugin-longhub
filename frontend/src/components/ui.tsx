@@ -13,17 +13,37 @@ import {
   LoaderCircle,
   X,
 } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ButtonHTMLAttributes, ReactNode } from 'react';
-import { imageSource } from '../api';
+import { api, imageSource, isMaiBot } from '../api';
 
 export function Button({
   variant = 'secondary',
   className = '',
   type = 'button',
+  onClick,
   ...props
-}: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: 'primary' | 'secondary' | 'ghost' }) {
-  return <BaseButton type={type} className={`button button-${variant} ${className}`} {...props} />;
+}: ButtonHTMLAttributes<HTMLButtonElement> & {
+  variant?: 'primary' | 'secondary' | 'ghost' | 'danger';
+}) {
+  return (
+    <BaseButton
+      type={type}
+      className={`button button-${variant} ${className}`}
+      {...props}
+      onClick={(event) => {
+        onClick?.(event);
+        if (window.maibot && type === 'submit' && !event.defaultPrevented) {
+          // MaiBot forbids native form submission before dispatching submit.
+          // Validate locally, then notify React; all I/O uses the authenticated bridge.
+          event.preventDefault();
+          const form = event.currentTarget.form;
+          if (form?.reportValidity())
+            form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+        }
+      }}
+    />
+  );
 }
 export function Badge({
   children,
@@ -307,30 +327,67 @@ export function Pagination({
   );
 }
 export function RemoteImage({
+  id,
   url,
   alt,
   className = '',
 }: {
+  id: string;
   url: string;
   alt: string;
   className?: string;
 }) {
   const [failed, setFailed] = useState(false);
-  const src = imageSource(url);
-  useEffect(() => setFailed(false), [url]);
-  return src && !failed ? (
-    <img
-      src={src}
-      alt={alt}
-      loading="lazy"
-      referrerPolicy="no-referrer"
-      className={className}
-      onError={() => setFailed(true)}
-    />
-  ) : (
-    <div className="image-fallback" role="img" aria-label="远程图片暂时不可用">
-      <ImageOff size={24} strokeWidth={1.4} />
-      <span>图片暂不可用</span>
+  const [preview, setPreview] = useState<string>();
+  const holder = useRef<HTMLDivElement>(null);
+  const native = isMaiBot();
+  const src = native ? preview : imageSource(url);
+  useEffect(() => {
+    setFailed(false);
+    setPreview(undefined);
+    if (!native || !holder.current) return;
+    let cancelled = false;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((entry) => entry.isIntersecting)) return;
+        observer.disconnect();
+        api
+          .get<{ data_url: string }>(`memes/${id}/preview`)
+          .then((result) => {
+            if (cancelled) return;
+            if (/^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(result.data_url))
+              setPreview(result.data_url);
+            else setFailed(true);
+          })
+          .catch(() => {
+            if (!cancelled) setFailed(true);
+          });
+      },
+      { rootMargin: '100px' },
+    );
+    observer.observe(holder.current);
+    return () => {
+      cancelled = true;
+      observer.disconnect();
+    };
+  }, [id, url, native]);
+  return (
+    <div ref={holder} className="remote-image">
+      {src && !failed ? (
+        <img
+          src={src}
+          alt={alt}
+          loading="lazy"
+          referrerPolicy="no-referrer"
+          className={className}
+          onError={() => setFailed(true)}
+        />
+      ) : (
+        <div className="image-fallback" role="img" aria-label="远程图片暂时不可用">
+          <ImageOff size={24} strokeWidth={1.4} />
+          <span>{native && !failed ? '正在载入预览' : '图片暂不可用'}</span>
+        </div>
+      )}
     </div>
   );
 }

@@ -32,6 +32,11 @@ export interface Status {
     next_attempt: number;
   }[];
   ready: boolean;
+  configuration?: {
+    app_key_configured: boolean;
+    webhook_secret_configured: boolean;
+    webhook_ready: boolean;
+  };
   vision_configured: boolean;
   receiver: { started: boolean; error: string | null; listen: string; path: string };
   sync: {
@@ -118,8 +123,15 @@ export interface Bridge {
   apiGet<T>(path: string, params?: Record<string, string | number>): Promise<T>;
   apiPost<T>(path: string, body: unknown): Promise<T>;
 }
+export interface MaiBotBridge {
+  ready: Promise<unknown>;
+  query<T>(alias: string, args: Record<string, string>): Promise<T>;
+  action<T>(alias: string, args: Record<string, string>): Promise<T>;
+  context?: { theme?: string };
+}
 declare global {
   interface Window {
+    maibot?: MaiBotBridge;
     AstrBotPluginView?: Bridge;
     AstrBotPluginPage?: Bridge;
   }

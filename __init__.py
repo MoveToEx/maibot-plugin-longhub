@@ -1,1 +1,1 @@
-"""LONG Hub AstrBot plugin."""
+"""LONG Hub catalog and MaiBot integration."""

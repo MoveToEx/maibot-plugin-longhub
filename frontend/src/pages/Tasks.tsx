@@ -1,11 +1,11 @@
 import { Switch } from '@base-ui/react/switch';
 import { Tooltip } from '@base-ui/react/tooltip';
 import { ListPlus, LoaderCircle, Pause, Play, RotateCcw } from 'lucide-react';
-import { lazy, Suspense } from 'react';
+import { lazy, Suspense, useState } from 'react';
 import type { ButtonHTMLAttributes, ReactNode } from 'react';
 import { Link } from 'react-router';
 import { api } from '../api';
-import { Badge, Loading, Panel, PanelHeading } from '../components/ui';
+import { Badge, Button, Loading, Modal, Panel, PanelHeading } from '../components/ui';
 import { useApp } from '../context';
 import { useAction } from '../hooks';
 
@@ -21,13 +21,14 @@ function IconAction({
   label,
   tip,
   children,
+  className = '',
   ...props
 }: ButtonHTMLAttributes<HTMLButtonElement> & { label: string; tip: string; children: ReactNode }) {
   return (
     <Tooltip.Root>
       <Tooltip.Trigger
         type="button"
-        className="task-icon-button"
+        className={`task-icon-button ${className}`}
         aria-label={label}
         delay={150}
         {...props}
@@ -48,6 +49,7 @@ function IconAction({
 export function Tasks() {
   const { status: s, notify, refresh } = useApp();
   const { run, pending } = useAction((message) => notify(message, true));
+  const [confirmReset, setConfirmReset] = useState(false);
   if (!s) return <Loading />;
   const counts = s.semantic?.catalog;
   const values = [
@@ -245,20 +247,11 @@ export function Tasks() {
                 </IconAction>
                 <IconAction
                   id="rebuild-semantic"
+                  className="task-icon-button-danger"
                   label="重置所有 Embedding"
                   tip="重置全部向量。未暂停时后台重新生成，暂停时等待继续"
                   disabled={pending || !s.semantic?.configured}
-                  onClick={() =>
-                    run(async () => {
-                      await api.post('semantic/rebuild');
-                      notify(
-                        s.semantic?.paused
-                          ? '旧向量已重置，继续后将重新生成。'
-                          : '全部向量已重置，后台将重新生成。',
-                      );
-                      refresh();
-                    })
-                  }
+                  onClick={() => setConfirmReset(true)}
                 >
                   <RotateCcw size={17} />
                 </IconAction>
@@ -267,6 +260,51 @@ export function Tasks() {
           />
         </Suspense>
       </div>
+      {confirmReset && (
+        <Modal
+          id="confirm-reset-semantic"
+          title="重置向量索引？"
+          description="重置后需要重新调用 Embedding 模型生成向量。"
+          onClose={() => {
+            if (!pending) setConfirmReset(false);
+          }}
+        >
+          <p className="px-6 py-5 text-sm text-muted leading-7">
+            {s.semantic?.paused
+              ? '将清空当前向量索引，恢复后台向量化后重新生成。'
+              : '将清空当前向量索引，并在后台重新生成。'}
+            重建完成前，语义检索暂不可用。
+          </p>
+          <div className="dialog-footer">
+            <Button disabled={pending} onClick={() => setConfirmReset(false)}>
+              取消
+            </Button>
+            <Button
+              variant="danger"
+              disabled={pending || !s.semantic?.configured}
+              onClick={() =>
+                run(async () => {
+                  await api.post('semantic/rebuild');
+                  notify(
+                    s.semantic?.paused
+                      ? '旧向量已重置，继续后将重新生成。'
+                      : '全部向量已重置，后台将重新生成。',
+                  );
+                  setConfirmReset(false);
+                  refresh();
+                })
+              }
+            >
+              {pending ? (
+                <LoaderCircle size={14} className="animate-spin" />
+              ) : (
+                <RotateCcw size={14} />
+              )}
+              {pending ? '正在重置…' : '确认重置'}
+            </Button>
+          </div>
+        </Modal>
+      )}
     </Tooltip.Provider>
   );
 }

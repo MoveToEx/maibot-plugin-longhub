@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 import { useEffect } from 'react';
 import { NavLink, Navigate, Route, Routes, useLocation } from 'react-router';
-import { api } from './api';
+import { api, syncReadiness } from './api';
 import { AppProvider, useApp } from './context';
 import { useResource } from './hooks';
 import { Button, ErrorState, Loading } from './components/ui';
@@ -94,7 +94,9 @@ function Shell() {
                     ? '已连接接收器'
                     : status.ready
                       ? '接收器异常'
-                      : '等待首次配置'}
+                      : syncReadiness(status).confirmationRequired
+                        ? '待确认订阅'
+                        : '等待首次配置'}
               </span>
             </span>
             <a
@@ -166,7 +168,7 @@ export default function App() {
         <ErrorState message={ready.error} retry={ready.reload} />
       </div>
     );
-  if (!ready.data) return <Loading label="正在连接 AstrBot" />;
+  if (!ready.data) return <Loading label="正在连接 LONG Hub 插件" />;
   return (
     <AppProvider>
       <Shell />

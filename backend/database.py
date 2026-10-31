@@ -8,6 +8,7 @@ from pathlib import Path
 from threading import Event
 
 from sqlalchemy import (
+    Integer,
     Text,
     and_,
     case,
@@ -340,7 +341,7 @@ class Database:
                     SearchEntry,
                     and_(
                         SearchEntry.generation == CatalogImage.generation,
-                        SearchEntry.image_id == cast(CatalogImage.id, Text),
+                        cast(SearchEntry.image_id, Integer) == CatalogImage.id,
                     ),
                 ).where(
                     type_coerce(fts, Text).match(

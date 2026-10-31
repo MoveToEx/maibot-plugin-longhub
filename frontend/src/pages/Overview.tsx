@@ -9,7 +9,7 @@ import {
 } from 'lucide-react';
 import { Link } from 'react-router';
 import { lazy, Suspense } from 'react';
-import { api, formatDate, jobLabels } from '../api';
+import { api, formatDate, jobLabels, syncReadiness } from '../api';
 import { Badge, Button, Loading, Panel, PanelHeading } from '../components/ui';
 import { useApp } from '../context';
 import { useAction } from '../hooks';
@@ -34,6 +34,7 @@ export function Overview() {
   if (!s) return <Loading />;
   const syncBusy = ['queued', 'running'].includes(s.sync.status);
   const syncError = s.sync.error || s.sync_error;
+  const readiness = syncReadiness(s);
   return (
     <div className="page-stack">
       <div className="overview-primary-row">
@@ -50,7 +51,7 @@ export function Overview() {
                       : 'accent'
                 }
               >
-                {s.ready ? jobLabels[s.sync.status] : '等待配置'}
+                {s.ready ? jobLabels[s.sync.status] : readiness.label}
               </Badge>
             }
           />
@@ -78,9 +79,16 @@ export function Overview() {
                   : `已导入 ${(s.sync.imported || 0).toLocaleString()} 条 · 刷新 ${s.sync.refreshed || 0} 张`
                 : s.sync.skipped
                   ? '远端目录未变化，已跳过全量同步'
-                  : '等待下一次校准'}
+                  : s.ready
+                    ? '等待下一次校准'
+                    : '尚未开始校准'}
             </Detail>
           </dl>
+          {readiness.message && (
+            <p className="text-xs text-muted leading-6" role="status">
+              {readiness.message}
+            </p>
+          )}
           {syncError && (
             <p className="inline-error" role="alert">
               {syncError}
@@ -89,9 +97,16 @@ export function Overview() {
           <div className="sync-actions">
             <Button
               variant="primary"
-              disabled={pending || syncBusy || !s.ready || !s.receiver.started}
+              disabled={
+                pending ||
+                syncBusy ||
+                (!s.ready && !readiness.confirmationRequired) ||
+                !s.receiver.started
+              }
               onClick={() =>
                 run(async () => {
+                  if (readiness.confirmationRequired)
+                    await api.post('settings/save', { webhook_ready: true });
                   await api.post('sync');
                   notify('目录校准已加入队列。');
                   refresh();
@@ -99,7 +114,11 @@ export function Overview() {
               }
             >
               <RefreshCw size={14} />
-              {syncBusy ? '校准进行中' : '立即校准'}
+              {syncBusy
+                ? '校准进行中'
+                : readiness.confirmationRequired
+                  ? '确认订阅并校准'
+                  : '立即校准'}
             </Button>
           </div>
         </Panel>

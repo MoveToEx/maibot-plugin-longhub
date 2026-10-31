@@ -125,7 +125,7 @@ class SemanticIndex:
         if not self.settings.embedding_provider_id:
             return None
         if self.provider_lookup is None:
-            raise SemanticError("尚未连接 AstrBot Embedding 提供商")
+            raise SemanticError("尚未连接宿主 Embedding 模型")
         return self.provider_lookup(self.settings.embedding_provider_id)
 
     async def status(self):

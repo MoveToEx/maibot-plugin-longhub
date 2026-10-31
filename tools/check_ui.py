@@ -1,11 +1,15 @@
 """Edge acceptance checks for the built SPA, using only in-memory bridge/media fixtures."""
 
+import argparse
 import asyncio
+import base64
 import html
+import io
 import json
 from pathlib import Path
 
 from aiohttp import web
+from PIL import Image
 from playwright.async_api import async_playwright, expect
 
 from backend.models import Settings
@@ -16,7 +20,8 @@ PREFIX = "/api/v1/plugins/longhub/views/catalog/_t/test-session/"
 BRIDGE = r"""
 (() => {
  const settings = SETTINGS;
- settings.app_key_configured = true; settings.webhook_secret_configured = true; settings.embedding_provider_id='embedding';
+ settings.app_key_configured = true; settings.webhook_secret_configured = true; settings.webhook_ready=true; settings.embedding_provider_id='embedding';
+ window.__settings=settings;
  const items = Array.from({length:65}, (_,i) => ({
   id:i===0?'9223372036854775807':String(i+1),
   text:['确实','开心','吃瓜','摸鱼','收到','疑惑','晚安','加油'][i%8],
@@ -28,6 +33,7 @@ BRIDGE = r"""
  }));
  const status={total:65,ratings:{none:58,moderate:7,violent:0},pending_notifications:2,
   tag_jobs:{queued:12,running:1,done:48,failed:4},tagging_paused:false,tagging_auto:false,ready:true,
+  configuration:{app_key_configured:true,webhook_secret_configured:true,webhook_ready:true},
   tag_queue:items.slice(0,5).map((item,i)=>({image_id:item.id,text:item.text,status:i===0?'running':'queued',attempts:0,next_attempt:0})),
   receiver:{started:true,error:null,listen:'127.0.0.1:8791',path:'/hooks/longhub'},
   sync:{status:'done'},last_sync:{completed_at:1792886400},last_webhook:1792886460,vision_configured:true,
@@ -75,12 +81,23 @@ BRIDGE = r"""
     item.effective_tags=[...new Set([...item.hub_tags,...item.ai_tags,...item.manual_tags])].filter(x=>!item.excluded_tags.includes(x));
     return structuredClone(item);
    }
-   if(path==='settings/save'){window.__lastSaved=structuredClone(body);Object.assign(settings,body);return {saved:true};}
+   if(path==='settings/save'){
+    window.__lastSaved=structuredClone(body);
+    const {app_key,webhook_secret,...safe}=body;Object.assign(settings,safe);
+    if(app_key!==undefined)settings.app_key_configured=!!app_key.trim();
+    if(webhook_secret!==undefined)settings.webhook_secret_configured=!!webhook_secret.trim();
+    status.configuration={app_key_configured:settings.app_key_configured,webhook_secret_configured:settings.webhook_secret_configured,webhook_ready:settings.webhook_ready};
+    status.ready=settings.app_key_configured&&settings.webhook_secret_configured&&settings.webhook_ready;
+    return {saved:true,settings:structuredClone(settings)};
+   }
    if(path==='tagging/pause'){status.tagging_paused=body.paused;return {paused:body.paused};}
    if(path==='tagging/auto'){status.tagging_auto=body.enabled;return {enabled:body.enabled};}
    if(path==='semantic/pause'){status.semantic.paused=body.paused;return {paused:body.paused};}
    if(path==='tagging/enqueue')return {queued:body.ids?.length||16};
-   if(path==='sync')return {id:'test-sync',status:'queued'};
+   if(path==='sync'){
+    if(!status.ready||!status.receiver.started)throw new Error('尚未完成同步配置');
+    return {id:'test-sync',status:'queued'};
+   }
    if(path==='webhook/retry')return {queued:true};
    if(path==='semantic/rebuild'){
     status.semantic.indexed=0;status.semantic.pending=status.semantic.annotated;status.semantic.available=false;
@@ -94,17 +111,69 @@ BRIDGE = r"""
 """
 
 
-async def check():
+async def check(*, maibot=False, sandbox_only=False):
+    bridge_script = BRIDGE.replace(
+        "SETTINGS", json.dumps(Settings(vision_provider_id="vision").public())
+    )
+    if maibot:
+        preview = io.BytesIO()
+        Image.new("RGB", (80, 60), "#ece8f7").save(preview, "JPEG")
+        data_url = "data:image/jpeg;base64," + base64.b64encode(preview.getvalue()).decode()
+        bridge_script += r"""
+(() => {
+ const original=window.AstrBotPluginView;
+ window.__maibotActive=0;window.__maibotMax=0;
+ async function call(operation){
+  window.__maibotMax=Math.max(window.__maibotMax,++window.__maibotActive);
+  if(window.__maibotActive>2)throw new Error('MaiBot concurrency budget exceeded');
+  try{await new Promise(resolve=>setTimeout(resolve,2));return await operation();}
+  finally{window.__maibotActive--;}
+ }
+ window.maibot={ready:Promise.resolve({theme:'light'}),context:{theme:'light'},
+  query:(alias,{path})=>call(()=>{
+   if(alias!=='read')throw new Error('Invalid query alias');
+   const url=new URL(path,'https://bridge.invalid');
+   if(url.pathname.endsWith('/preview'))return {data_url:DATA_URL};
+   return original.apiGet(url.pathname.slice(1),Object.fromEntries(url.searchParams));
+  }),
+  action:(alias,{path,payload})=>call(()=>{
+   if(alias!=='write')throw new Error('Invalid action alias');
+   return original.apiPost(path.slice(1),JSON.parse(payload));
+  })
+ };
+ delete window.AstrBotPluginView;
+})();
+""".replace("DATA_URL", json.dumps(data_url))
+    csp = "default-src 'none'; script-src 'unsafe-inline' blob:; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'"
+
     @web.middleware
     async def cors(request, handler):
         response = await handler(request)
         response.headers["Access-Control-Allow-Origin"] = "*"
+        if maibot and request.path.endswith("index.html"):
+            response.headers["Content-Security-Policy"] = csp
         return response
 
     app = web.Application(middlewares=[cors])
-    app.router.add_static(PREFIX, ROOT / "views" / "catalog")
+    app.router.add_static(PREFIX, ROOT / "views" / ("maibot" if maibot else "catalog"))
 
     async def sandbox(_):
+        if maibot:
+            document = (ROOT / "views" / "maibot" / "index.html").read_text(encoding="utf-8")
+            document = document.replace(
+                "<head>",
+                '<head><meta http-equiv="Content-Security-Policy" content="'
+                + html.escape(csp, quote=True)
+                + '"><script>'
+                + bridge_script
+                + "</script>",
+            )
+            return web.Response(
+                text='<iframe title="Plugin View" sandbox="allow-scripts" srcdoc="'
+                + html.escape(document, quote=True)
+                + '" style="border:0;width:100%;height:950px"></iframe>',
+                content_type="text/html",
+            )
         return web.Response(
             text=f'<iframe title="Plugin View" sandbox="allow-scripts allow-forms allow-downloads" '
             f'src="{PREFIX}index.html#/catalog" style="border:0;width:100%;height:950px"></iframe>',
@@ -118,9 +187,6 @@ async def check():
     await site.start()
     origin = f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"
     url = origin + PREFIX + "index.html"
-    output = ROOT / ".preview-data"
-    output.mkdir(exist_ok=True)
-    settings = Settings(vision_provider_id="vision").public()
     errors = []
 
     async def media(route):
@@ -142,8 +208,26 @@ async def check():
                     viewport={"width": 1440, "height": 1100}, reduced_motion="reduce"
                 )
                 page.on("pageerror", lambda error: errors.append(str(error)))
-                await page.add_init_script(BRIDGE.replace("SETTINGS", json.dumps(settings)))
+                page.on(
+                    "console",
+                    lambda message: (
+                        errors.append(message.text) if message.type == "error" else None
+                    ),
+                )
+                await page.add_init_script(bridge_script)
                 await page.route("https://r2.longhub.top/**", media)
+                if sandbox_only:
+                    await page.goto(origin + "/sandbox.html")
+                    await page.wait_for_timeout(1500)
+                    frame = page.frame_locator("iframe")
+                    print("Sandbox errors:", errors, flush=True)
+                    print(
+                        "Sandbox body:",
+                        (await frame.locator("body").inner_text())[:1000],
+                        flush=True,
+                    )
+                    await expect(frame.locator('[data-tab="catalog"]')).to_be_visible(timeout=3000)
+                    return
                 await page.goto(url)
                 await expect(page.locator("#connection-state")).to_have_text("已连接接收器")
                 await expect(page.locator(".page-heading h1 + p")).to_have_count(0)
@@ -203,7 +287,6 @@ async def check():
                 )
                 await page.keyboard.press("Escape")
                 await page.locator("#refresh").focus()
-                await page.screenshot(path=str(output / "overview.png"), full_page=True)
                 # Observe real rendering across incremental updates, loss of readiness and empty catalogs.
                 await page.evaluate("""() => {
                     window.__originalStatus=structuredClone(window.__status);
@@ -215,7 +298,6 @@ async def check():
                 await expect(page.locator("#annotation-chart canvas")).to_have_attribute(
                     "aria-label", "图库标注进度：待标注 16 张，已标注未向量化 6 张，已向量化 43 张"
                 )
-                await page.screenshot(path=str(output / "overview-indexing.png"), full_page=True)
                 await page.evaluate("""() => {
                     window.__status.total=0;
                     Object.assign(window.__status.semantic.catalog,{total:0,unannotated:0,annotated_unindexed:0,indexed:0});
@@ -243,7 +325,6 @@ async def check():
                     .get_by_role("button", name="happy", exact=True)
                     .click()
                 )
-                await page.screenshot(path=str(output / "meme-detail.png"))
                 await page.get_by_role("button", name="保存修订", exact=True).click()
                 await expect(page.get_by_role("dialog")).to_have_count(0)
                 await page.locator(".card-image").first.click()
@@ -280,7 +361,6 @@ async def check():
                 await expect(page.get_by_role("alert")).to_contain_text("测试读取失败")
                 await page.get_by_role("button", name="重试", exact=True).click()
                 await expect(page.locator(".meme-card")).to_have_count(30)
-                await page.screenshot(path=str(output / "catalog.png"))
                 await page.locator('[data-tab="logs"]').click()
                 await expect(page.locator("#log-rows tr")).to_have_count(3)
                 await page.get_by_role("button", name="查看日志 1", exact=True).click()
@@ -317,7 +397,6 @@ async def check():
                     "aria-label", "Embedding 进度：待向量化 6 张，已向量化 43 张"
                 )
                 await page.locator("#refresh").focus()
-                await page.screenshot(path=str(output / "tasks.png"), full_page=True)
                 await page.get_by_role("switch", name="自动标注", exact=True).click()
                 await expect(
                     page.get_by_role("switch", name="自动标注", exact=True)
@@ -340,14 +419,41 @@ async def check():
                     "window.__calls.some(x=>x.path==='tagging/enqueue'&&x.body.force===true)"
                 )
                 await page.locator("#rebuild-semantic").click()
-                await page.wait_for_function(
+                reset_dialog = page.get_by_role("dialog", name="重置向量索引？", exact=True)
+                await expect(reset_dialog).to_be_visible()
+                assert not await page.evaluate(
                     "window.__calls.some(x=>x.method==='POST'&&x.path==='semantic/rebuild')"
+                )
+                await reset_dialog.get_by_role("button", name="取消", exact=True).click()
+                await expect(reset_dialog).to_have_count(0)
+                assert not await page.evaluate(
+                    "window.__calls.some(x=>x.method==='POST'&&x.path==='semantic/rebuild')"
+                )
+                await page.locator("#rebuild-semantic").click()
+                await page.keyboard.press("Escape")
+                await expect(reset_dialog).to_have_count(0)
+                assert not await page.evaluate(
+                    "window.__calls.some(x=>x.method==='POST'&&x.path==='semantic/rebuild')"
+                )
+                await expect(page.locator("#rebuild-semantic")).to_have_css(
+                    "color", "rgb(193, 83, 97)"
+                )
+                await page.locator("#rebuild-semantic").click()
+                await expect(
+                    reset_dialog.get_by_role("button", name="确认重置", exact=True)
+                ).to_have_css("background-color", "rgb(183, 53, 74)")
+                await reset_dialog.get_by_role("button", name="确认重置", exact=True).click()
+                await expect(reset_dialog).to_have_count(0)
+                assert (
+                    await page.evaluate(
+                        "window.__calls.filter(x=>x.method==='POST'&&x.path==='semantic/rebuild').length"
+                    )
+                    == 1
                 )
                 await expect(page.locator("#embedding-progress canvas")).to_have_attribute(
                     "aria-label", "Embedding 进度：待向量化 49 张，已向量化 0 张"
                 )
                 await page.locator("#refresh").focus()
-                await page.screenshot(path=str(output / "tasks-paused.png"), full_page=True)
                 await page.locator("#pause-embedding").click()
                 await expect(page.locator("#pause-embedding")).to_have_attribute(
                     "aria-label", "暂停 Embedding"
@@ -364,7 +470,9 @@ async def check():
                 await page.locator('[data-tab="settings"]').click()
                 await page.locator('[name="tagging_rpm"]').fill("9")
                 await page.locator('[name="embedding_rpm"]').fill("12")
-                await page.get_by_role("switch", name="已在 LONG Hub 启用订阅", exact=True).click()
+                subscription = page.get_by_role("switch", name="已在 LONG Hub 启用订阅", exact=True)
+                if not await subscription.is_checked():
+                    await subscription.click()
                 await page.get_by_role("checkbox", name="允许 violent", exact=True).uncheck()
                 await page.get_by_role("combobox", name="视觉标注提供商", exact=True).click()
                 await page.get_by_role("option", name="暂不启用视觉标注", exact=True).click()
@@ -379,12 +487,6 @@ async def check():
                     saved["embedding_provider_id"] == "embedding" and saved["embedding_rpm"] == 12
                 ), saved
                 await expect(page.locator('[name="tagging_rpm"]')).to_have_value("9")
-                await page.screenshot(path=str(output / "settings.png"), full_page=True)
-                await (
-                    page.locator('[name="embedding_rpm"]')
-                    .locator("xpath=ancestor::section")
-                    .screenshot(path=str(output / "embedding-settings.png"))
-                )
                 await page.locator('[data-tab="overview"]').click()
                 if await page.get_by_role("button", name="关闭通知", exact=True).count():
                     await page.get_by_role("button", name="关闭通知", exact=True).click()
@@ -392,10 +494,11 @@ async def check():
                 await expect(page.locator("#refresh")).to_have_css(
                     "background-color", "rgb(28, 29, 37)"
                 )
-                await page.screenshot(path=str(output / "overview-dark.png"), full_page=True)
                 await page.locator('[data-tab="tasks"]').click()
                 await expect(page.locator("#embedding-progress canvas")).to_be_visible()
-                await page.screenshot(path=str(output / "tasks-dark.png"), full_page=True)
+                await expect(page.locator("#rebuild-semantic")).to_have_css(
+                    "color", "rgb(229, 148, 160)"
+                )
                 await page.evaluate("document.documentElement.dataset.theme='light'")
                 await page.set_viewport_size({"width": 390, "height": 844})
                 for tab in ["overview", "catalog", "logs", "tasks", "settings"]:
@@ -405,10 +508,6 @@ async def check():
                     assert await page.evaluate(
                         "document.documentElement.scrollWidth <= innerWidth"
                     ), tab
-                    if tab in ["overview", "catalog", "tasks"]:
-                        await page.screenshot(
-                            path=str(output / f"{tab}-mobile.png"), full_page=tab == "tasks"
-                        )
                 await page.set_viewport_size({"width": 1440, "height": 1100})
                 await page.goto(url + "#/catalog/9223372036854775807")
                 await expect(page.locator("#manual-tags")).to_be_visible()
@@ -418,24 +517,109 @@ async def check():
                 await expect(page).to_have_url(url + "#/catalog")
                 await page.goto(origin + "/sandbox.html")
                 frame = page.frame_locator("iframe")
+                if maibot:
+                    await page.wait_for_timeout(500)
+                    if not await frame.locator('[data-tab="catalog"]').count():
+                        print("Sandbox errors:", errors)
+                        print("Sandbox body:", await frame.locator("body").inner_text())
+                    await frame.locator('[data-tab="catalog"]').click()
                 await expect(frame.locator(".meme-card")).to_have_count(30)
+                if maibot:
+                    await expect(frame.locator(".card-image img").first).to_be_visible()
+                    assert (
+                        await page.locator("iframe").evaluate("el=>el.sandbox.value")
+                        == "allow-scripts"
+                    )
+                    assert await page.frames[1].evaluate("window.__maibotMax") <= 2
                 await frame.locator(".card-image").first.click()
                 await expect(frame.locator("#manual-tags")).to_be_visible()
-                await frame.get_by_role("button", name="关闭", exact=True).click()
+                if maibot:
+                    await frame.locator("#manual-tags").fill("沙箱标签")
+                    await frame.get_by_role("button", name="保存修订", exact=True).click()
+                else:
+                    await frame.get_by_role("button", name="关闭", exact=True).click()
                 await expect(frame.get_by_role("dialog")).to_have_count(0)
+                if maibot:
+                    await frame.locator("#query").fill("摸鱼")
+                    await frame.locator('#search-form button[type="submit"]').click()
+                    await expect(frame.locator(".meme-card")).to_have_count(8)
+                    await frame.locator("#query").fill("")
+                    await frame.locator("#query").press("Enter")
+                    await expect(frame.locator(".meme-card")).to_have_count(30)
                 await frame.locator('[data-tab="settings"]').click()
                 await expect(frame.locator("#settings-form")).to_be_visible()
+                if maibot:
+                    await frame.locator('[name="tagging_rpm"]').fill("11")
+                    await frame.locator('#settings-form button[type="submit"]').click()
+                    await expect(frame.locator(".notice")).to_contain_text("配置已保存")
+                    assert (await page.frames[1].evaluate("window.__lastSaved"))[
+                        "tagging_rpm"
+                    ] == 11
+                    await expect(frame.locator('[name="tagging_rpm"]')).to_have_value("11")
+                    await frame.locator('[data-tab="tasks"]').click()
+                    await frame.locator("#pause-tagging").click()
+                    await expect(frame.locator("#pause-tagging")).to_have_attribute(
+                        "aria-label", "继续标注队列"
+                    )
+                    await frame.locator("#rebuild-semantic").click()
+                    frame_reset_dialog = frame.get_by_role(
+                        "dialog", name="重置向量索引？", exact=True
+                    )
+                    await expect(frame_reset_dialog).to_be_visible()
+                    await frame_reset_dialog.get_by_role("button", name="取消", exact=True).click()
+                    await expect(frame_reset_dialog).to_have_count(0)
+                    assert not await page.frames[1].evaluate(
+                        "window.__calls.some(x=>x.method==='POST'&&x.path==='semantic/rebuild')"
+                    )
                 await frame.locator('[data-tab="overview"]').click()
                 await expect(frame.locator("#annotation-chart canvas")).to_be_visible()
                 await frame.get_by_role("button", name="语义查询可用", exact=True).hover()
                 await expect(frame.get_by_role("tooltip")).to_contain_text(
                     "上下文明确相关时优先使用"
                 )
+                # First-time setup must identify the missing subscription confirmation,
+                # retain both secrets during its sparse save, and reach a real sync call.
+                await page.frames[1].evaluate("""() => {
+                    Object.assign(window.__settings,{app_key_configured:false,webhook_secret_configured:false,webhook_ready:false});
+                    Object.assign(window.__status,{ready:false,configuration:{app_key_configured:false,webhook_secret_configured:false,webhook_ready:false}});
+                }""")
+                await frame.locator("#refresh").click()
+                await expect(frame.locator("#sync-panel")).to_contain_text(
+                    "Appkey、Webhook 签名密钥"
+                )
+                await expect(
+                    frame.get_by_role("button", name="立即校准", exact=True)
+                ).to_be_disabled()
+                await frame.locator('[data-tab="settings"]').click()
+                await frame.locator('[name="app_key"]').fill("test-app-key")
+                await frame.locator('[name="webhook_secret"]').fill("test-hook-secret")
+                await expect(
+                    frame.get_by_role("switch", name="已在 LONG Hub 启用订阅", exact=True)
+                ).not_to_be_checked()
+                await frame.locator('#settings-form button[type="submit"]').click()
+                await expect(frame.locator('[name="app_key"]')).to_have_value("")
+                assert (await page.frames[1].evaluate("window.__lastSaved"))[
+                    "app_key"
+                ] == "test-app-key"
+                await frame.locator('[data-tab="overview"]').click()
+                await expect(frame.locator("#connection-state")).to_have_text("待确认订阅")
+                await expect(frame.locator("#sync-panel")).to_contain_text("密钥已保存")
+                await frame.get_by_role("button", name="确认订阅并校准", exact=True).click()
+                await expect(frame.locator("#connection-state")).to_have_text("已连接接收器")
+                assert await page.frames[1].evaluate(
+                    "window.__calls.some(x=>x.method==='POST'&&x.path==='sync') && window.__status.ready"
+                )
+                assert await page.frames[1].evaluate("window.__lastSaved") == {
+                    "webhook_ready": True
+                }
+                await expect(frame.locator("#connection-state")).to_have_text("已连接接收器")
+                await expect(
+                    frame.get_by_role("button", name="立即校准", exact=True)
+                ).to_be_enabled()
                 assert not errors, errors
                 print(
                     "SPA checks passed: overview layout/pie/tooltip/updates/empty, routes/history/reload, filters/pagination, edits/int64/XSS, selections, retry, logs/tasks/settings, dark/mobile, sandbox iframe"
                 )
-                print(output / "overview.png")
             finally:
                 await browser.close()
     finally:
@@ -443,4 +627,8 @@ async def check():
 
 
 if __name__ == "__main__":
-    asyncio.run(check())
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--maibot", action="store_true")
+    parser.add_argument("--sandbox-only", action="store_true")
+    args = parser.parse_args()
+    asyncio.run(check(maibot=args.maibot, sandbox_only=args.sandbox_only))

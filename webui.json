@@ -1,0 +1,21 @@
+{
+  "schema_version": 2,
+  "required_capabilities": ["custom_pages"],
+  "pages": [{
+    "id": "catalog",
+    "title": "LONG Hub",
+    "icon": "database",
+    "mode": "custom",
+    "entry": "views/maibot/index.html",
+    "layout": "viewport",
+    "queries": {
+      "read": {"api": "panel_read", "parameters": {"path": {"type": "string", "required": true, "max_length": 10000}}}
+    },
+    "actions": {
+      "write": {"api": "panel_write", "parameters": {
+        "path": {"type": "string", "required": true, "max_length": 10000},
+        "payload": {"type": "string", "required": true, "max_length": 65536}
+      }}
+    }
+  }]
+}

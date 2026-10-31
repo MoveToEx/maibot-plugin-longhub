@@ -250,3 +250,26 @@ async def test_orm_json_null_booleans_and_int64_roundtrip(db, image):
         row = await session.scalar(select(CatalogImage))
         assert isinstance(row.hub_tags, list) and isinstance(row.raw, dict)
         assert row.id == 2**63 - 1
+
+
+async def test_common_term_search_uses_bounded_work_and_preserves_int64(db, image):
+    # A frequent tag must not scan every matched FTS row once for each image.
+    identifiers = [*range(1, 256), 2**63 - 1]
+    await publish(db, [image(ident, tag_names=["龙脸"]) for ident in identifiers])
+    calls = 0
+
+    def budget():
+        nonlocal calls
+        calls += 1
+        return int(calls > 200)
+
+    async with db.engine.connect() as connection:
+        raw = await connection.get_raw_connection()
+        driver = raw.driver_connection
+        await driver.set_progress_handler(budget, 1000)
+    try:
+        result = await db.list_images(query="龙脸", limit=1)
+    finally:
+        await driver.set_progress_handler(None, 0)
+    assert result["total"] == 256
+    assert result["items"][0]["id"] == str(2**63 - 1)
