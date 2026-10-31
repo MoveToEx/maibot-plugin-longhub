@@ -2,15 +2,55 @@ import type { Bridge } from './types';
 
 function bridge(): Bridge {
   const value = window.AstrBotPluginView ?? window.AstrBotPluginPage;
-  if (!value) throw new Error('请从 AstrBot 插件详情中的「页面」打开 LONG Hub 管理面板。');
+  if (!value) throw new Error('请从宿主的 LONG Hub 插件页面打开管理面板。');
   return value;
 }
 
+export const isMaiBot = () => !!window.maibot;
+// MaiBot permits at most two active WebUI calls per plugin. Include thumbnails.
+let active = 0;
+const pending: { start: () => void; background: boolean }[] = [];
+async function scheduled<T>(operation: () => Promise<T>, background = false): Promise<T> {
+  if (active >= 2) await new Promise<void>((start) => pending.push({ start, background }));
+  else active++;
+  try {
+    return await operation();
+  } finally {
+    const foreground = pending.findIndex((request) => !request.background);
+    const next = pending.splice(foreground < 0 ? 0 : foreground, 1)[0];
+    if (next) next.start();
+    else active--;
+  }
+}
+function theme() {
+  document.documentElement.dataset.theme = window.maibot?.context?.theme ?? 'light';
+}
+window.addEventListener('maibot:context', theme);
 export const api = {
-  ready: () => bridge().ready(),
-  get: <T>(path: string, params?: Record<string, string | number>) =>
-    bridge().apiGet<T>(path, params),
-  post: <T>(path: string, body: unknown = {}) => bridge().apiPost<T>(path, body),
+  ready: async () => {
+    if (!window.maibot) return bridge().ready();
+    await window.maibot.ready;
+    theme();
+  },
+  get: <T>(path: string, params?: Record<string, string | number>): Promise<T> => {
+    if (!window.maibot) return bridge().apiGet<T>(path, params);
+    const query = new URLSearchParams();
+    Object.entries(params ?? {}).forEach(([key, value]) => query.set(key, String(value)));
+    const internal = '/' + path.replace(/^\/+/, '') + (query.size ? '?' + query : '');
+    return scheduled(
+      () => window.maibot!.query<T>('read', { path: internal }),
+      path.endsWith('/preview'),
+    );
+  },
+  post: <T>(path: string, body: unknown = {}): Promise<T> =>
+    window.maibot
+      ? scheduled(() =>
+          window.maibot!.action<T>('write', {
+            path: '/' + path.replace(/^\/+/, ''),
+            payload: JSON.stringify(body),
+          }),
+        )
+      : bridge().apiPost<T>(path, body),
 };
 export const jobLabels: Record<string, string> = {
   idle: '空闲',

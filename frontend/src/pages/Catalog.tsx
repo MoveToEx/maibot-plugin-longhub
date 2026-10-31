@@ -195,7 +195,7 @@ export function Catalog() {
                   className="card-image"
                   aria-label={`查看表情 ${item.id}`}
                 >
-                  <RemoteImage url={item.image_url} alt={item.text || '无文字表情'} />
+                  <RemoteImage id={item.id} url={item.image_url} alt={item.text || '无文字表情'} />
                   <span className="card-open">
                     <ArrowUpRight size={16} />
                   </span>
@@ -347,7 +347,7 @@ function EditMeme({ item, close }: { item: Meme; close: () => void }) {
       <div className="meme-detail">
         <div className="detail-preview">
           <div className="detail-image">
-            <RemoteImage url={item.image_url} alt={item.text || '表情预览'} />
+            <RemoteImage id={item.id} url={item.image_url} alt={item.text || '表情预览'} />
           </div>
           <div className="p-5">
             <p className="text-sm leading-7 break-words">{item.text || '无文字表情'}</p>

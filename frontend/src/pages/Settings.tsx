@@ -315,7 +315,7 @@ function SettingsForm({ data, reload }: { data: SettingsData; reload: () => void
                 defaultValue={s.vision_provider_id}
                 options={options}
               />
-              <span className="field-note">请选择原生支持图片输入的 AstrBot 提供商。</span>
+              <span className="field-note">请选择宿主中原生支持图片输入的模型。</span>
             </label>
             <Field
               title="每分钟最多标注调用"
@@ -375,7 +375,7 @@ function SettingsForm({ data, reload }: { data: SettingsData; reload: () => void
         </SettingsSection>
         <SettingsSection
           title="语义检索"
-          description="使用 AstrBot 的 Embedding 提供商和内置向量库理解表情含义。"
+          description="使用宿主的 Embedding 模型理解表情含义。"
           icon={<Sparkles size={18} />}
         >
           <div className="form-grid">
@@ -388,7 +388,7 @@ function SettingsForm({ data, reload }: { data: SettingsData; reload: () => void
                 options={embeddingOptions}
               />
               <span className="field-note">
-                在 AstrBot 提供商设置中添加嵌入模型，无需在此填写密钥。
+                在宿主的模型设置中配置 Embedding，无需在此填写密钥。
               </span>
             </label>
             <Field

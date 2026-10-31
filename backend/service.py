@@ -158,7 +158,7 @@ class Service:
 
     async def set_auto_tagging(self, enabled):
         if enabled and not self.settings.vision_provider_id:
-            raise ValueError("请先选择支持原生视觉输入的 AstrBot 提供商")
+            raise ValueError("请先选择支持原生视觉输入的宿主模型")
         await self.db.set_meta("tagging_auto", enabled)
         self.auto_tag_revision = None
         self.auto_tag_wakeup.set()
@@ -238,7 +238,7 @@ class Service:
 
     async def bulk_tags(self, ids=None, *, force=False):
         if not self.settings.vision_provider_id:
-            raise ValueError("请先选择支持原生视觉输入的 AstrBot 提供商")
+            raise ValueError("请先选择支持原生视觉输入的宿主模型")
         if ids is not None:
             count = await self.db.enqueue_tags(
                 ids, force=force, provider_id=self.settings.vision_provider_id

@@ -1,7 +1,7 @@
 import { Component, StrictMode } from 'react';
 import type { ErrorInfo, ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { HashRouter } from 'react-router';
+import { HashRouter, MemoryRouter } from 'react-router';
 import App from './App';
 import { Button } from './components/ui';
 import './styles.css';
@@ -29,12 +29,16 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { failed: boolean
   }
 }
 
+// MaiBot uses an opaque-origin srcdoc iframe. HashRouter cannot build URLs
+// relative to about:srcdoc; keep this iframe's navigation in React Router memory.
+const Router = window.maibot && location.protocol === 'about:' ? MemoryRouter : HashRouter;
+
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <ErrorBoundary>
-      <HashRouter>
+      <Router>
         <App />
-      </HashRouter>
+      </Router>
     </ErrorBoundary>
   </StrictMode>,
 );

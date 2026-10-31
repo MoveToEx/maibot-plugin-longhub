@@ -166,7 +166,7 @@ export default function App() {
         <ErrorState message={ready.error} retry={ready.reload} />
       </div>
     );
-  if (!ready.data) return <Loading label="正在连接 AstrBot" />;
+  if (!ready.data) return <Loading label="正在连接 LONG Hub 插件" />;
   return (
     <AppProvider>
       <Shell />

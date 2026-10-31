@@ -20,7 +20,7 @@ def safe_error(exc):
         return str(exc)
     status = getattr(exc, "status_code", None)
     detail = f"HTTP {status}" if isinstance(status, int) else type(exc).__name__
-    return f"语义索引或 Embedding 调用失败（{detail}），请检查 AstrBot 嵌入提供商配置"
+    return f"语义索引或 Embedding 调用失败（{detail}），请检查宿主嵌入模型配置"
 
 
 def error_details(exc, *, provider=None, settings=None):
@@ -76,7 +76,7 @@ class Embeddings:
             or not isinstance(self.dimension, int)
             or not 1 <= self.dimension <= 32768
         ):
-            raise SemanticError("Embedding 向量维度无效，请在 AstrBot 提供商中配置正确的维度")
+            raise SemanticError("Embedding 向量维度无效，请在宿主中配置正确的维度")
         self.rpm = rpm
         self.rate_lock = asyncio.Lock()
         self.last_call = float("-inf")
