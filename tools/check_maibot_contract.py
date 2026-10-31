@@ -106,7 +106,7 @@ def validate(source):
     sys.modules[package.__name__] = package
     load(package.__name__ + ".context_item", payload / "context_item.py")
     snapshots = load(package.__name__ + ".context_snapshot", payload / "context_snapshot.py")
-    policy = sys.modules["longhub_contract_plugin.maibot_adapter.policy"]
+    policy = sys.modules["longhub_contract_plugin.runtime.policy"]
     for item in policy.inject([], policy.SEARCH_POLICY):
         restored = snapshots.deserialize_context_item_snapshot(item)
         assert snapshots.serialize_context_item_snapshot(restored) == item
@@ -129,7 +129,7 @@ def validate(source):
         "deepcopy": copy.deepcopy,
     }
     exec(compile(tree, str(path), "exec"), namespace)
-    delivery = sys.modules["longhub_contract_plugin.maibot_adapter.delivery"]
+    delivery = sys.modules["longhub_contract_plugin.runtime.delivery"]
     receipt = delivery.Receipt("chat", "turn", "1", {"image_id": "1"})
     messages = [
         {

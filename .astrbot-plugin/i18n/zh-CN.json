@@ -1,8 +1,0 @@
-{
-  "views": {
-    "catalog": {
-      "title": "LONG Hub 表情目录",
-      "description": "远程表情目录、人工标签、同步状态与 webhook 日志"
-    }
-  }
-}

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import math
 
-from ..backend.vector_store import SemanticError
+from ..backend.errors import SemanticError
 
 
 def _vector(payload):
@@ -23,24 +25,32 @@ def _vector(payload):
 class MaiBotEmbedding:
     def __init__(self, ctx, task, model, dimension):
         self.ctx, self.task, self.model, self.dimension = ctx, task, model, dimension
-        self.provider_config = {"type": "maibot_sdk", "embedding_dimensions": dimension}
 
-    def get_dim(self):
-        return self.dimension
+    def previous_profiles(self, document_version):
+        """Upgrade MaiBot 0.6.x cache keys to stable model-task identities."""
+        package = type(self).__module__.removesuffix(".runtime.models")
+        values = [
+            self.task,
+            package + ".maibot_adapter.providers",
+            "MaiBotEmbedding",
+            self.model,
+            self.dimension,
+            {
+                "api_base": None,
+                "api_base_url": None,
+                "base_url": None,
+                "embedding_dimensions": self.dimension,
+                "type": "maibot_sdk",
+            },
+            document_version,
+        ]
+        return {hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()}
 
-    def get_model(self):
-        return self.model
-
-    async def get_embedding(self, text):
-        return (await self.get_embeddings_batch([text]))[0]
-
-    async def get_embeddings_batch(self, texts, **kwargs):
-        del kwargs
-        result = await self.ctx.llm.embed(texts=texts, task_name=self.task, max_concurrent=1)
+    def _results(self, result, count, *, batch):
         if result.get("success") is not True:
             raise SemanticError("MaiBot Embedding 调用失败，请检查宿主模型任务日志")
-        rows = result.get("results")
-        if not isinstance(rows, list) or len(rows) != len(texts):
+        rows = result.get("results") if batch else [result]
+        if not isinstance(rows, list) or len(rows) != count:
             raise SemanticError("MaiBot Embedding 返回数量不匹配")
         values = []
         for row in rows:
@@ -51,6 +61,14 @@ class MaiBotEmbedding:
                 raise SemanticError("MaiBot Embedding 任务切换了模型或维度，请重新保存设置重建索引")
             values.append(vector)
         return values
+
+    async def embed(self, text):
+        result = await self.ctx.llm.embed(text=text, task_name=self.task)
+        return self._results(result, 1, batch=False)[0]
+
+    async def embed_many(self, texts):
+        result = await self.ctx.llm.embed(texts=texts, task_name=self.task, max_concurrent=1)
+        return self._results(result, len(texts), batch=True)
 
 
 class Models:

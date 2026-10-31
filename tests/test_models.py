@@ -1,17 +1,14 @@
 import json
 from dataclasses import asdict
-from pathlib import Path
 
 import pytest
 
 from backend.models import Settings, image_id, normalize_image
 
 
-def test_schema_defaults_match_settings():
-    schema = json.loads(
-        (Path(__file__).parents[1] / "_conf_schema.json").read_text(encoding="utf-8")
-    )
-    assert {k: v["default"] for k, v in schema.items()} == asdict(Settings())
+def test_defaults_round_trip_through_persistent_settings():
+    defaults = asdict(Settings())
+    assert asdict(Settings.from_dict(json.loads(json.dumps(defaults)))) == defaults
 
 
 def test_secrets_redacted():

@@ -1,12 +1,11 @@
-import type { Bridge, Status } from './types';
+import type { MaiBotBridge, Status } from './types';
 
-function bridge(): Bridge {
-  const value = window.AstrBotPluginView ?? window.AstrBotPluginPage;
-  if (!value) throw new Error('请从宿主的 LONG Hub 插件页面打开管理面板。');
+function bridge(): MaiBotBridge {
+  const value = window.maibot;
+  if (!value) throw new Error('请从 MaiBot 的 LONG Hub 插件页面打开管理面板。');
   return value;
 }
 
-export const isMaiBot = () => !!window.maibot;
 // MaiBot permits at most two active WebUI calls per plugin. Include thumbnails.
 let active = 0;
 const pending: { start: () => void; background: boolean }[] = [];
@@ -28,29 +27,25 @@ function theme() {
 window.addEventListener('maibot:context', theme);
 export const api = {
   ready: async () => {
-    if (!window.maibot) return bridge().ready();
-    await window.maibot.ready;
+    await bridge().ready;
     theme();
   },
   get: <T>(path: string, params?: Record<string, string | number>): Promise<T> => {
-    if (!window.maibot) return bridge().apiGet<T>(path, params);
     const query = new URLSearchParams();
     Object.entries(params ?? {}).forEach(([key, value]) => query.set(key, String(value)));
     const internal = '/' + path.replace(/^\/+/, '') + (query.size ? '?' + query : '');
     return scheduled(
-      () => window.maibot!.query<T>('read', { path: internal }),
+      () => bridge().query<T>('read', { path: internal }),
       path.endsWith('/preview'),
     );
   },
   post: <T>(path: string, body: unknown = {}): Promise<T> =>
-    window.maibot
-      ? scheduled(() =>
-          window.maibot!.action<T>('write', {
-            path: '/' + path.replace(/^\/+/, ''),
-            payload: JSON.stringify(body),
-          }),
-        )
-      : bridge().apiPost<T>(path, body),
+    scheduled(() =>
+      bridge().action<T>('write', {
+        path: '/' + path.replace(/^\/+/, ''),
+        payload: JSON.stringify(body),
+      }),
+    ),
 };
 export const jobLabels: Record<string, string> = {
   idle: '空闲',
@@ -93,14 +88,4 @@ export function syncReadiness(status: Status) {
         ? `请在「连接与设置」配置 ${missing.join('、')}。`
         : '请完成密钥配置并确认 webhook 订阅。';
   return { confirmationRequired, label, message };
-}
-
-export function imageSource(value: string): string | undefined {
-  try {
-    const url = new URL(value);
-    if (url.protocol === 'https:' && !url.username && !url.password) return url.href;
-  } catch {
-    /* Invalid upstream media stays a text placeholder. */
-  }
-  return undefined;
 }

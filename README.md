@@ -1,6 +1,6 @@
 # LONG Hub · MaiBot 龙图插件
 
-这是从 AstrBot LONG Hub 插件迁移而来的 MaiBot 插件，当前版本 **0.6.4**。安装入口为 `plugin.py`，发行 ZIP 只包含 MaiBot 运行所需文件。原 AstrBot 0.5.1 代码可在[历史提交 e51c774](https://github.com/MoveToEx/maibot-plugin-longhub/tree/e51c7747f276992093827bf4ae358ebdc70dcf79)查看。
+这是基于 MaiBot 隔离插件 SDK 的原生插件，当前版本 **0.7.0**。`plugin.py` 直接声明生命周期、Planner Hook、Tool、ReplyExtension、Command 与 WebUI API。
 
 同步 LONG Hub 目录、补全视觉标注，通过语义、标签 SQL 或文字寻找表情。图片从 S3 兼容的 R2 存储按需读取，发送、GIF 抽帧和 WebUI 缩略图均在内存中处理，不创建本地图片库。
 
@@ -45,26 +45,24 @@
 
 Hub 标签、视觉标签、人工标签和排除标签独立保留。视觉模型会把被 P 上去的龙玉涛脸称为「龙脸」。GIF 使用四帧拼图输入，并明确告知模型这是一段动图的时间采样，避免标成四格漫画。
 
-MaiBot 目前没有公开的插件向量库 API。本分支使用宿主 `llm.embed` 生成向量，通过 SQLAlchemy 在插件目录持久化归一化 float32 向量，在工作线程分批计算余弦相似度，不依赖 AstrBot、FAISS 或 NumPy。检索复杂度为 O(图库向量数 × 维度)，大图库或高维模型需要评估延迟；不会把整个向量库一次性载入内存。模型/维度变化会拒绝混用旧向量，重新保存设置或宿主重载模型配置后重建。
+MaiBot 目前没有公开的插件向量库 API。插件使用宿主 `llm.embed` 生成向量，通过 SQLAlchemy 在插件目录持久化归一化 float32 向量，在工作线程分批计算余弦相似度，不依赖 FAISS 或 NumPy。检索复杂度为 O(图库向量数 × 维度)，大图库或高维模型需要评估延迟；不会把整个向量库一次性载入内存。模型/维度变化会拒绝混用旧向量，重新保存设置或宿主重载模型配置后重建。
 
 面板保留 React + Vite + React Router + Tailwind + Base UI，使用 Chart.js 展示标注和 Embedding 进度。单文件 HTML 不依赖 CDN、Node 运行环境或外部静态资源；R2 缩略图由原生 API 返回内存中的 JPEG data URL，最多缓存 8 MiB。
 
 MaiBot 的 IPC 单帧上限为 16 MiB。本插件限制原图为 11 MiB，并额外检查整组回复大小，超出时要求换图；`max_image_mb` 仍控制下载及标注上限。
 
-## 从 AstrBot 导入
+## 升级与数据
 
-先备份、停止两端插件，准备一个**尚不存在**的 MaiBot 目标数据目录，然后在本插件目录运行：
+推荐通过仓库地址 `https://github.com/MoveToEx/maibot-plugin-longhub` 安装并跟踪 `main` 分支，后续使用 MaiBot 插件管理中的「更新」。ZIP 安装已存在时不要重复安装；可通过更新接口指定仓库地址将其接入 Git。下载源请选择可访问该仓库的 GitHub。
 
-```sh
-uv run python -m tools.migrate_astrbot \
-  --astrbot-data /path/to/astrbot/plugin_data/astrbot_plugin_longhub \
-  --data-dir /path/to/maibot/data/plugins/movetoex.longhub \
-  --config /path/to/astrbot/data/config/astrbot_plugin_longhub_config.json
-```
+0.7.0 仅支持 MaiBot。保留原有插件 ID `movetoex.longhub`、`settings.json`、数据库表结构及标注文档版本。0.6.x MaiBot 向量缓存经模型、维度和文档指纹校验后直接复用，无需重新标注或向量化。升级前请备份插件数据目录。业务配置和目录数据保存在宿主分配的数据目录，启用开关 `config.toml` 仍由宿主在插件代码目录中管理。
 
-`--config` 可省略。不省略时会保留 Hub 配置与密钥，但清空旧框架模型 ID，并关闭 webhook 订阅确认。工具只接受 schema v2（AstrBot 0.5.x）的数据库，使用 SQLite backup API 复制一致快照；拒绝覆盖现有目录，来源保持不变。
+## 项目结构
 
-保留目录、手工修订、有效视觉标注、任务与 webhook 日志。不复制图片或旧 FAISS 索引。导入后在新面板重新选择模型、检查 webhook 地址、确认订阅；向量索引自动重建。避免两套实例同时处理同一订阅。原 AstrBot 的会话 ID 与 MaiBot 不兼容，旧发送记录不会用于新会话去重。
+- `plugin.py`：MaiBot SDK 原生入口、工具与回复扩展。
+- `runtime/`：MaiBot 模型任务、发送回执、配置及 WebUI 页面服务。
+- `backend/`：LONG Hub 同步、目录 ORM、视觉标注、语义索引及 SQLite 向量存储。
+- `frontend/`：仅通过 `window.maibot` 通信的 SPA；构建输出为 `views/maibot/index.html`。
 
 ## 开发与验证
 
@@ -76,11 +74,11 @@ cd frontend
 npm ci
 npm run build
 cd ..
-uv run --group browser python -m tools.check_ui --maibot
+uv run --group browser python -m tools.check_ui
 uv run python -m tools.package
 ```
 
-浏览器检查使用系统 Edge，仅运行内存中的桥接和图片测试数据。`views/maibot/index.html` 已预构建在发行包中。`npm run build -- --mode astrbot` 可另行构建历史面板以运行原 AstrBot 回归检查。`tools/check_maibot_contract.py` 可对照指定 MaiBot 源码校验原生声明和上下文协议。
+浏览器检查使用系统 Edge，仅运行内存中的桥接和图片测试数据。`views/maibot/index.html` 已预构建在发行包中。`tools/check_maibot_contract.py` 可对照指定 MaiBot 源码校验原生声明和上下文协议。
 
 已完成本地 SDK、数据库、发送回执与浏览器沙箱验证，并在服务器上的 MaiBot 验证了旧图库标注导入、WebUI 和文本检索。真实 QQ 图片发送尚未单独完成端到端验收。
 

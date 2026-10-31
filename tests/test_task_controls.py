@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -6,8 +7,7 @@ from sqlalchemy import update
 
 from backend.orm import TagJob
 from tests.conftest import publish
-from tests.test_plugin import plugin as plugin
-from tests.test_plugin import plugin_module as plugin_module
+from tests.test_maibot import mai as mai
 
 
 async def test_queue_preview_is_current_ordered_limited_and_preserves_large_ids(db, image):
@@ -37,19 +37,16 @@ async def test_queue_preview_is_current_ordered_limited_and_preserves_large_ids(
 
 
 @pytest.mark.parametrize(
-    ("method", "key"), [("api_auto_tagging", "enabled"), ("api_pause_semantic", "paused")]
+    ("path", "key"), [("/tagging/auto", "enabled"), ("/semantic/pause", "paused")]
 )
-async def test_task_control_apis_validate_boolean_and_forward_state(
-    plugin, plugin_module, method, key
-):
+async def test_task_control_apis_validate_boolean_and_forward_state(mai, path, key):
+    plugin, _ = mai
     target = AsyncMock(return_value={key: True})
     plugin.service.set_auto_tagging = target
     plugin.service.semantic = SimpleNamespace(set_paused=target)
     for bad in (None, "true", 1):
-        plugin_module.test_request.json.return_value = {key: bad}
         with pytest.raises(ValueError, match="布尔值"):
-            await getattr(plugin, method)()
+            await plugin.panel_write(path, json.dumps({key: bad}))
     target.assert_not_awaited()
-    plugin_module.test_request.json.return_value = {key: True}
-    assert await getattr(plugin, method)() == {key: True}
+    assert await plugin.panel_write(path, json.dumps({key: True})) == {key: True}
     target.assert_awaited_once_with(True)

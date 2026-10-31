@@ -10,8 +10,10 @@ import shutil
 import uuid
 from pathlib import Path
 
+from .embeddings import Embeddings
+from .errors import SemanticError, error_details, safe_error
 from .models import PROMPT_VERSION
-from .vector_store import Embeddings, NativeVectorStore, SemanticError, error_details, safe_error
+from .vector_store import SQLiteVectorStore
 
 logger = logging.getLogger(__name__)
 DOCUMENT_VERSION = 1
@@ -56,31 +58,13 @@ def document(row):
 
 
 def provider_profile(provider, ident):
-    config = getattr(provider, "provider_config", {})
-    values = [
-        ident,
-        type(provider).__module__,
-        type(provider).__qualname__,
-        provider.get_model(),
-        provider.get_dim(),
-        {
-            key: config.get(key)
-            for key in (
-                "api_base",
-                "api_base_url",
-                "base_url",
-                "embedding_dimensions",
-                "type",
-            )
-        },
-        DOCUMENT_VERSION,
-    ]
+    values = ["maibot.llm.embed", ident, provider.model, provider.dimension, DOCUMENT_VERSION]
     return hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
 
 
 class SemanticIndex:
     def __init__(
-        self, db, root: Path, settings, provider_lookup=None, store_factory=NativeVectorStore
+        self, db, root: Path, settings, provider_lookup=None, store_factory=SQLiteVectorStore
     ):
         self.db, self.root, self.settings = db, (root / "semantic").resolve(), settings
         self.provider_lookup, self.store_factory = provider_lookup, store_factory
@@ -138,7 +122,7 @@ class SemanticIndex:
         if configured:
             try:
                 provider = self._provider()
-                model = provider.get_model()
+                model = provider.model
                 current = self.provider is provider and self.profile == provider_profile(
                     provider, self.settings.embedding_provider_id
                 )
@@ -239,7 +223,11 @@ class SemanticIndex:
             cache = await self.db.get_meta("semantic_cache", {})
             directory = self._cache_directory(cache.get("directory"))
             reuse = (
-                cache.get("profile") == profile
+                (
+                    cache.get("profile") == profile
+                    or cache.get("profile")
+                    in getattr(provider, "previous_profiles", lambda _: set())(DOCUMENT_VERSION)
+                )
                 and directory is not None
                 and directory.exists()
                 and not cache.get("dirty")
@@ -254,7 +242,7 @@ class SemanticIndex:
                 )
                 store = None
                 try:
-                    store = self.store_factory(self.directory, self.embeddings)
+                    store = self.store_factory(self.directory, self.embeddings.dimension)
                     entries = await store.initialize()
                     self.store, self.entries = store, entries
                     await self.db.set_meta("semantic_cache", self._cache_state(False))
@@ -315,7 +303,7 @@ class SemanticIndex:
             self.error = None
             return bool(obsolete)
         store, embeddings, profile = self.store, self.embeddings, self.profile
-        # Network requests run outside the FAISS lock; queries needn't wait for backfill I/O.
+        # Network requests run outside the index lock; queries needn't wait for backfill I/O.
         vectors = await embeddings.embed_many([doc["content"] for doc in missing])
         await self.refresh()
         async with self.index_lock:

@@ -12,8 +12,7 @@ from backend.models import Settings
 from backend.service import Service
 from backend.sync import SyncEngine
 from tests.conftest import publish
-from tests.test_plugin import plugin as plugin
-from tests.test_plugin import plugin_module as plugin_module
+from tests.test_maibot import mai as mai
 
 STAMP = "2026-10-27T08:30:00.123456Z"
 NEW_STAMP = "2026-10-27T08:30:00.123457Z"
@@ -302,17 +301,17 @@ async def test_version_survives_restart_and_manual_checks_keep_the_job_id(tmp_pa
 
 
 @pytest.mark.parametrize("force", [False, True])
-async def test_sync_api_forwards_force_boolean(plugin, plugin_module, force):
+async def test_sync_api_forwards_force_boolean(mai, force):
+    plugin, _ = mai
     plugin.service.start_sync = Mock(return_value={"status": "queued"})
-    plugin_module.test_request.json.return_value = {"force": force}
-    await plugin.api_sync()
+    await plugin.panel_write("/sync", json.dumps({"force": force}))
     plugin.service.start_sync.assert_called_once_with(force=force)
 
 
 @pytest.mark.parametrize("force", ["true", 1, None])
-async def test_sync_api_rejects_nonboolean_force(plugin, plugin_module, force):
+async def test_sync_api_rejects_nonboolean_force(mai, force):
+    plugin, _ = mai
     plugin.service.start_sync = Mock()
-    plugin_module.test_request.json.return_value = {"force": force}
     with pytest.raises(ValueError):
-        await plugin.api_sync()
+        await plugin.panel_write("/sync", json.dumps({"force": force}))
     plugin.service.start_sync.assert_not_called()

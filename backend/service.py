@@ -25,7 +25,6 @@ class Service:
         generate,
         *,
         embedding_provider=None,
-        vector_store_factory=None,
     ):
         self.settings = settings
         self.db = Database(data_dir / "catalog.sqlite3")
@@ -33,12 +32,7 @@ class Service:
         self.sync = SyncEngine(self.db, self.client, settings)
         self.webhook = WebhookServer(self.db, settings)
         self.tagger = Tagger(self.db, self.client, settings, generate)
-        semantic_options = (
-            {"store_factory": vector_store_factory} if vector_store_factory is not None else {}
-        )
-        self.semantic = SemanticIndex(
-            self.db, data_dir, settings, embedding_provider, **semantic_options
-        )
+        self.semantic = SemanticIndex(self.db, data_dir, settings, embedding_provider)
         self.tasks = []
         self.sync_task = None
         self.stopping = False

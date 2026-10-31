@@ -19,10 +19,8 @@ import pytest_asyncio
 from maibot_sdk.context import PluginContext, PluginPaths
 from PIL import Image
 
-from backend.database import Database
 from backend.models import Settings
 from tests.conftest import publish
-from tools.migrate_astrbot import migrate
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
@@ -31,11 +29,11 @@ SPEC = importlib.util.spec_from_file_location(
 ENTRY = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = ENTRY
 SPEC.loader.exec_module(ENTRY)
-ADAPTER = sys.modules["longhub_maibot_test.maibot_adapter.plugin"]
-PROVIDERS = sys.modules["longhub_maibot_test.maibot_adapter.providers"]
-VECTOR = sys.modules["longhub_maibot_test.maibot_adapter.vector_store"]
-POLICY = sys.modules["longhub_maibot_test.maibot_adapter.policy"]
-ERROR = sys.modules["longhub_maibot_test.backend.vector_store"].SemanticError
+NATIVE = ENTRY
+PROVIDERS = sys.modules["longhub_maibot_test.runtime.models"]
+VECTOR = sys.modules["longhub_maibot_test.backend.vector_store"]
+POLICY = sys.modules["longhub_maibot_test.runtime.policy"]
+ERROR = sys.modules["longhub_maibot_test.backend.errors"].SemanticError
 SEMANTIC = sys.modules["longhub_maibot_test.backend.semantic"].SemanticIndex
 
 
@@ -370,11 +368,11 @@ async def test_provider_real_sdk_shapes_and_vision_input(mai):
     models.task = "embedding"
     await models._prepare()
     provider = models.lookup("embedding")
-    assert await provider.get_embeddings_batch(["开心", "难过"], batch_size=16) == [
+    assert await provider.embed_many(["开心", "难过"]) == [
         [3.0, 0.0, 0.0],
         [0.0, 2.0, 0.0],
     ]
-    assert provider.get_dim() == 3
+    assert provider.dimension == 3
     await models.generate(
         provider_id="vision-test",
         prompt="prompt",
@@ -387,10 +385,10 @@ async def test_provider_real_sdk_shapes_and_vision_input(mai):
     ].startswith("data:")
     host.model = "different-model"
     with pytest.raises(ERROR, match="切换"):
-        await provider.get_embedding("开心")
+        await provider.embed("开心")
     host.failure = True
     with pytest.raises(ERROR) as exc:
-        await provider.get_embedding("开心")
+        await provider.embed("开心")
     assert "private upstream" not in str(exc.value)
 
 
@@ -483,50 +481,14 @@ async def test_slow_thumbnail_does_not_hold_lifecycle_lock(mai):
     assert (await preview)["data_url"].startswith("data:")
 
 
-async def test_import_preserves_metadata_without_images_or_old_provider_ids(db, image, tmp_path):
-    await publish(db, [image(9223372036854775807)])
-    await db.update_override(
-        9223372036854775807, {"manual_tags": ["龙脸"], "description": "人工描述"}
-    )
-    config = tmp_path / "astrbot-config.json"
-    config.write_text(
-        json.dumps(
-            {
-                "app_key": "secret",
-                "vision_provider_id": "old-vision",
-                "embedding_provider_id": "old-embed",
-            }
-        ),
-        encoding="utf-8",
-    )
-    target = tmp_path.with_name(tmp_path.name + "-mai-data")
-    await asyncio.to_thread(migrate, db.path.parent, target, config)
-    saved = json.loads((target / "settings.json").read_text(encoding="utf-8"))
-    assert (
-        saved["app_key"] == "secret"
-        and saved["embedding_provider_id"] == saved["vision_provider_id"] == ""
-        and not saved["webhook_ready"]
-    )
-    copied = Database(target / "catalog.sqlite3")
-    await copied.open()
-    try:
-        assert (await copied.get_image(9223372036854775807))["manual_tags"] == ["龙脸"]
-    finally:
-        await copied.close()
-    with pytest.raises(ValueError):
-        migrate(db.path.parent, target)
-
-
 async def test_start_and_stop_using_native_plugin_paths(tmp_path, unused_tcp_port):
     plugin, host = ENTRY.create_plugin(), Host()
     host.plugin = plugin
     plugin._set_context(
         PluginContext("movetoex.longhub", host.rpc, PluginPaths(tmp_path, tmp_path / "runtime"))
     )
-    adapter_settings = sys.modules["longhub_maibot_test.maibot_adapter.settings"].SettingsFile(
-        tmp_path
-    )
-    adapter_settings.save(Settings(webhook_port=unused_tcp_port, auto_tagging=False))
+    settings_file = sys.modules["longhub_maibot_test.runtime.settings"].SettingsFile(tmp_path)
+    settings_file.save(Settings(webhook_port=unused_tcp_port, auto_tagging=False))
     await plugin.on_load()
     assert (await plugin.panel_read("/status"))["receiver"]["started"]
     await plugin.on_unload()
@@ -545,10 +507,8 @@ async def test_save_credentials_and_confirm_subscription_survive_reload(
         started.set()
         await asyncio.Event().wait()
 
-    monkeypatch.setattr(ADAPTER.Service, "_run_sync", running_sync)
-    settings_file = sys.modules["longhub_maibot_test.maibot_adapter.settings"].SettingsFile(
-        tmp_path
-    )
+    monkeypatch.setattr(NATIVE.Service, "_run_sync", running_sync)
+    settings_file = sys.modules["longhub_maibot_test.runtime.settings"].SettingsFile(tmp_path)
     settings_file.save(Settings(webhook_port=unused_tcp_port, auto_tagging=False))
     for reload in (False, True):
         plugin, host = ENTRY.create_plugin(), Host()
@@ -606,3 +566,75 @@ async def test_save_credentials_and_confirm_subscription_survive_reload(
         finally:
             await plugin.on_unload()
         started.clear()
+
+
+@pytest.mark.parametrize(
+    "old_model,old_dimension,dirty,reuse",
+    [
+        ("embedding-test", 3, False, True),
+        ("another-model", 3, False, False),
+        ("embedding-test", 4, False, False),
+        ("embedding-test", 3, True, False),
+    ],
+)
+async def test_maibot_06_vector_cache_upgrade_checks_model_and_reuses_vectors(
+    mai, tmp_path, old_model, old_dimension, dirty, reuse
+):
+    """Seed the released SQLite format/profile, then upgrade using the real SDK task."""
+    import hashlib
+
+    plugin, host = mai
+    models = PROVIDERS.Models(plugin.ctx)
+    models.task = "embedding"
+    await models._prepare()
+    db = plugin.service.db
+    for ident, text in [(1, "开心"), (2, "难过")]:
+        await db.update_override(ident, {"description": text})
+    settings = replace(
+        plugin.service.settings, embedding_provider_id="embedding", embedding_rpm=600
+    )
+    index = SEMANTIC(db, tmp_path, settings, models.lookup)
+    await index.refresh()
+    directory = tmp_path / "semantic" / ("a" * 32)
+    store = VECTOR.SQLiteVectorStore(directory, 3)
+    try:
+        await store.initialize()
+        await store.insert(list(index.desired.values()), [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    finally:
+        await store.close()
+    # Independent copy of 0.6.4's persisted fingerprint: it included the import name.
+    old_profile = hashlib.sha256(
+        json.dumps(
+            [
+                "embedding",
+                ENTRY.__name__ + ".maibot_adapter.providers",
+                "MaiBotEmbedding",
+                old_model,
+                old_dimension,
+                {
+                    "api_base": None,
+                    "api_base_url": None,
+                    "base_url": None,
+                    "embedding_dimensions": old_dimension,
+                    "type": "maibot_sdk",
+                },
+                1,
+            ],
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+    await db.set_meta(
+        "semantic_cache", {"profile": old_profile, "directory": directory.name, "dirty": dirty}
+    )
+    host.calls.clear()
+    try:
+        await index.run_once()
+        assert (await index.status())["available"]
+        assert (index.directory == directory) is reuse
+        calls = [args for name, args in host.calls if name == "llm.embed"]
+        assert len(calls) == (0 if reuse else 1)
+        assert (await db.get_meta("semantic_cache"))["profile"] != old_profile
+        assert (await index.search("开心"))[0]["id"] == "1"
+    finally:
+        await index.close()
+        await models.close()

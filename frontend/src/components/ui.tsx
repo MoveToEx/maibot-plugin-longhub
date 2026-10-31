@@ -15,7 +15,7 @@ import {
 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import type { ButtonHTMLAttributes, ReactNode } from 'react';
-import { api, imageSource, isMaiBot } from '../api';
+import { api } from '../api';
 
 export function Button({
   variant = 'secondary',
@@ -340,12 +340,11 @@ export function RemoteImage({
   const [failed, setFailed] = useState(false);
   const [preview, setPreview] = useState<string>();
   const holder = useRef<HTMLDivElement>(null);
-  const native = isMaiBot();
-  const src = native ? preview : imageSource(url);
+  const src = preview;
   useEffect(() => {
     setFailed(false);
     setPreview(undefined);
-    if (!native || !holder.current) return;
+    if (!holder.current) return;
     let cancelled = false;
     const observer = new IntersectionObserver(
       (entries) => {
@@ -370,7 +369,7 @@ export function RemoteImage({
       cancelled = true;
       observer.disconnect();
     };
-  }, [id, url, native]);
+  }, [id, url]);
   return (
     <div ref={holder} className="remote-image">
       {src && !failed ? (
@@ -385,7 +384,7 @@ export function RemoteImage({
       ) : (
         <div className="image-fallback" role="img" aria-label="远程图片暂时不可用">
           <ImageOff size={24} strokeWidth={1.4} />
-          <span>{native && !failed ? '正在载入预览' : '图片暂不可用'}</span>
+          <span>{!failed ? '正在载入预览' : '图片暂不可用'}</span>
         </div>
       )}
     </div>

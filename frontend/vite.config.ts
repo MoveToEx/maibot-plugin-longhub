@@ -39,14 +39,14 @@ function singleFile(): Plugin {
     },
   };
 }
-export default defineConfig(({ mode }) => ({
-  plugins: [react(), tailwindcss(), ...(mode === 'astrbot' ? [] : [singleFile()])],
+export default defineConfig({
+  plugins: [react(), tailwindcss(), singleFile()],
   base: './',
   build: {
-    outDir: mode === 'astrbot' ? '../views/catalog' : '../views/maibot',
+    outDir: '../views/maibot',
     emptyOutDir: true,
     target: 'es2022',
     cssCodeSplit: false,
     rolldownOptions: { output: { codeSplitting: false } },
   },
-}));
+});

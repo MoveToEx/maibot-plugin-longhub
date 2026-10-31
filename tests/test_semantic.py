@@ -1,34 +1,24 @@
 import copy
-import logging
 import math
 from dataclasses import replace
-from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
+from backend.embeddings import Embeddings
+from backend.errors import SemanticError
 from backend.models import Settings
 from backend.semantic import SemanticIndex
-from backend.vector_store import Embeddings, SemanticError
 from tests.conftest import publish
-from tests.test_plugin import Event
-from tests.test_plugin import plugin as plugin
-from tests.test_plugin import plugin_module as plugin_module
 
 
 class Provider:
     def __init__(self):
         self.model = "test-embedding"
-        self.provider_config = {"api_base": "https://embedding.example.test", "key": "sk-private"}
+        self.dimension = 3
         self.batch_calls = []
         self.query_calls = []
         self.on_batch = self.on_query = None
-
-    def get_dim(self):
-        return 3
-
-    def get_model(self):
-        return self.model
 
     def vector(self, text):
         if "开心" in text or "happy" in text:
@@ -37,13 +27,13 @@ class Provider:
             return [0.0, 2.0, 0.0]
         return [0.0, 0.0, 4.0]
 
-    async def get_embedding(self, text):
+    async def embed(self, text):
         self.query_calls.append(text)
         if self.on_query:
             await self.on_query()
         return self.vector(text)
 
-    async def get_embeddings_batch(self, texts, **kwargs):
+    async def embed_many(self, texts):
         self.batch_calls.append(list(texts))
         if self.on_batch:
             await self.on_batch()
@@ -55,7 +45,7 @@ class Factory:
         self.data = {}
         self.fail_load = self.fail_insert = False
 
-    def __call__(self, directory, embeddings):
+    def __call__(self, directory, dimension):
         directory.mkdir(parents=True, exist_ok=True)
         rows = self.data.setdefault(str(directory), {})
         factory = self
@@ -329,7 +319,7 @@ async def test_manual_rebuild_and_provider_batch_failure(db, image, tmp_path):
     )
     await engine.run_once()
     assert engine.directory != old and (await engine.status())["available"]
-    provider.get_embeddings_batch = AsyncMock(return_value=[[1, 0, 0]])
+    provider.embed_many = AsyncMock(return_value=[[1, 0, 0]])
     await engine.rebuild()
     with pytest.raises(SemanticError, match="数量"):
         await engine.run_once()
@@ -380,100 +370,9 @@ def test_invalid_vectors_rejected(vector):
         Embeddings(Provider(), 30).normalize(vector)
 
 
-async def test_cached_vectors_do_not_call_provider_or_leak_across_tasks():
-    provider = Provider()
-    adapter = Embeddings(provider, 600)
-    with adapter.precomputed(["x"], [[1, 0, 0]]):
-        assert await adapter.get_embedding("x") == [1, 0, 0]
-        assert await adapter.get_embeddings_batch(["x"]) == [[1, 0, 0]]
-    assert not provider.query_calls and not provider.batch_calls
-    result = await adapter.get_embedding("x")
-    assert result == [0, 0, 1] and provider.query_calls == ["x"]
-
-
 async def test_provider_exception_bodies_are_not_exposed():
     provider = Provider()
-    provider.get_embedding = AsyncMock(side_effect=RuntimeError("sk-private base64-payload"))
+    provider.embed = AsyncMock(side_effect=RuntimeError("sk-private base64-payload"))
     with pytest.raises(SemanticError) as raised:
         await Embeddings(provider, 30).embed("概念")
     assert "sk-private" not in str(raised.value) and "base64" not in str(raised.value)
-
-
-@pytest.mark.parametrize("available", [False, True])
-async def test_request_tool_gating_and_preference_are_local(plugin, plugin_module, available):
-    class ToolSet:
-        def __init__(self):
-            self.tools = [
-                SimpleNamespace(name=name)
-                for name in (plugin_module.SEMANTIC_TOOL, "search_longhub_memes")
-            ]
-
-        def remove_tool(self, name):
-            self.tools = [tool for tool in self.tools if tool.name != name]
-
-    tools = ToolSet()
-    plugin.service.semantic = SimpleNamespace(
-        status=AsyncMock(return_value={"available": available})
-    )
-    plugin.service.candidates = AsyncMock(return_value=[])
-    req = SimpleNamespace(system_prompt="原人格", func_tool=tools)
-    await plugin.provide_candidates(Event(), req)
-    exposed = [tool.name for tool in req.func_tool.tools]
-    assert (plugin_module.SEMANTIC_TOOL in exposed) is available
-    assert plugin_module.SEMANTIC_TOOL in [tool.name for tool in tools.tools]
-    if available:
-        plugin.service.candidates.assert_not_awaited()
-        assert "不要先拆成精确标签" in req.system_prompt
-        assert "只有聊天具有有意义的上下文" in req.system_prompt
-    else:
-        plugin.service.candidates.assert_awaited_once()
-    assert "RANDOM()" not in req.system_prompt and "随机" not in req.system_prompt
-    assert "每轮回复结束前，必须先调用一次 LONG Hub 搜索工具" in req.system_prompt
-
-
-async def test_tool_returns_candidates_without_sending_and_embedding_settings_validation(
-    plugin, plugin_module
-):
-    plugin.service.semantic = SimpleNamespace(
-        search=AsyncMock(return_value=[{"id": "1", "similarity": 0.9}])
-    )
-    event = Event()
-    assert '"method": "embedding"' in await plugin.search_longhub_memes_semantic(event, "开心")
-    assert not event.sent
-    with pytest.raises(ValueError, match="Embedding"):
-        plugin._embedding_provider("wrong-type")
-    provider = Provider()
-    plugin.context.get_provider_by_id = lambda _: provider
-    assert plugin._embedding_provider("embedding") is provider
-
-
-async def test_semantic_tool_logs_original_error_chain_and_redacts_secrets(
-    plugin, plugin_module, db, image, tmp_path, caplog
-):
-    engine, provider, _ = await setup(db, image, tmp_path)
-    engine.settings = replace(engine.settings, app_key="hub-private", webhook_secret="hook-private")
-    provider.provider_config["key"] = ["sk-private", "rotated-private"]
-    provider.provider_config["headers"] = {"Authorization": "Bearer header-private"}
-    await engine.run_once()
-    plugin.service.semantic = engine
-    plugin.service.settings = engine.settings
-
-    class EmbeddingRequestError(RuntimeError):
-        status_code = 422
-
-    secrets = ["sk-private", "rotated-private", "hub-private", "hook-private", "header-private"]
-    provider.get_embedding = AsyncMock(
-        side_effect=EmbeddingRequestError("invalid embedding input dimension; " + " ".join(secrets))
-    )
-    with caplog.at_level(logging.ERROR, logger=plugin_module.logger.name):
-        result = await plugin.search_longhub_memes_semantic(Event(), "尴尬的回应")
-    assert "语义检索失败" in result and "invalid embedding input dimension" not in result
-    records = [record for record in caplog.records if record.name == plugin_module.logger.name]
-    assert len(records) == 1 and records[0].levelno == logging.ERROR
-    details = records[0].getMessage()
-    assert "语义检索失败" in details and "embedding" in details
-    assert "Traceback" in details and "EmbeddingRequestError" in details
-    assert "HTTP 422" in details and "invalid embedding input dimension" in details
-    assert "[REDACTED]" in details
-    assert all(secret not in details and secret not in result for secret in secrets)
-    await engine.close()

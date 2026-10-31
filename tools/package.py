@@ -25,18 +25,11 @@ def build():
     ]
     for directory, pattern in (
         ("backend", "*.py"),
-        ("maibot_adapter", "*.py"),
+        ("runtime", "*.py"),
         ("views/maibot", "*.html"),
         ("_locales", "*.json"),
     ):
         files.extend(p for p in (ROOT / directory).rglob(pattern) if p.is_file())
-    files = [
-        source
-        for source in files
-        if source.name != "delivery.py" or source.parent.name != "backend"
-    ]
-    files.append(ROOT / "tools" / "migrate_astrbot.py")
-    files.append(ROOT / "tools" / "__init__.py")
     version = json.loads((ROOT / "_manifest.json").read_text(encoding="utf-8"))["version"]
     if not (ROOT / "views" / "maibot" / "index.html").is_file():
         raise RuntimeError("先运行 frontend 中的 npm run build")

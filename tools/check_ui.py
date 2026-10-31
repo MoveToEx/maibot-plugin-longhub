@@ -15,7 +15,7 @@ from playwright.async_api import async_playwright, expect
 from backend.models import Settings
 
 ROOT = Path(__file__).resolve().parents[1]
-PREFIX = "/api/v1/plugins/longhub/views/catalog/_t/test-session/"
+PREFIX = "/longhub/"
 
 BRIDGE = r"""
 (() => {
@@ -48,7 +48,7 @@ BRIDGE = r"""
    http_status:401,processed:false,attempts:0,error:'Signature mismatch',body:''}
  ];
  window.__lastSaved=null;window.__calls=[];window.__failNext=null;
- window.AstrBotPluginView={
+ window.__catalogFixture={
   ready:async()=>({}),
   apiGet:async(path,params={})=>{
    window.__calls.push({method:'GET',path,params:structuredClone(params)});
@@ -111,17 +111,16 @@ BRIDGE = r"""
 """
 
 
-async def check(*, maibot=False, sandbox_only=False):
+async def check(*, sandbox_only=False):
     bridge_script = BRIDGE.replace(
         "SETTINGS", json.dumps(Settings(vision_provider_id="vision").public())
     )
-    if maibot:
-        preview = io.BytesIO()
-        Image.new("RGB", (80, 60), "#ece8f7").save(preview, "JPEG")
-        data_url = "data:image/jpeg;base64," + base64.b64encode(preview.getvalue()).decode()
-        bridge_script += r"""
+    preview = io.BytesIO()
+    Image.new("RGB", (80, 60), "#ece8f7").save(preview, "JPEG")
+    data_url = "data:image/jpeg;base64," + base64.b64encode(preview.getvalue()).decode()
+    bridge_script += r"""
 (() => {
- const original=window.AstrBotPluginView;
+ const original=window.__catalogFixture;
  window.__maibotActive=0;window.__maibotMax=0;
  async function call(operation){
   window.__maibotMax=Math.max(window.__maibotMax,++window.__maibotActive);
@@ -141,7 +140,7 @@ async def check(*, maibot=False, sandbox_only=False):
    return original.apiPost(path.slice(1),JSON.parse(payload));
   })
  };
- delete window.AstrBotPluginView;
+ delete window.__catalogFixture;
 })();
 """.replace("DATA_URL", json.dumps(data_url))
     csp = "default-src 'none'; script-src 'unsafe-inline' blob:; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'"
@@ -150,33 +149,32 @@ async def check(*, maibot=False, sandbox_only=False):
     async def cors(request, handler):
         response = await handler(request)
         response.headers["Access-Control-Allow-Origin"] = "*"
-        if maibot and request.path.endswith("index.html"):
+        if request.path.endswith("index.html"):
             response.headers["Content-Security-Policy"] = csp
         return response
 
     app = web.Application(middlewares=[cors])
-    app.router.add_static(PREFIX, ROOT / "views" / ("maibot" if maibot else "catalog"))
+    app.router.add_static(PREFIX, ROOT / "views" / "maibot")
+
+    async def favicon(_):
+        return web.Response(status=204)
+
+    app.router.add_get("/favicon.ico", favicon)
 
     async def sandbox(_):
-        if maibot:
-            document = (ROOT / "views" / "maibot" / "index.html").read_text(encoding="utf-8")
-            document = document.replace(
-                "<head>",
-                '<head><meta http-equiv="Content-Security-Policy" content="'
-                + html.escape(csp, quote=True)
-                + '"><script>'
-                + bridge_script
-                + "</script>",
-            )
-            return web.Response(
-                text='<iframe title="Plugin View" sandbox="allow-scripts" srcdoc="'
-                + html.escape(document, quote=True)
-                + '" style="border:0;width:100%;height:950px"></iframe>',
-                content_type="text/html",
-            )
+        document = (ROOT / "views" / "maibot" / "index.html").read_text(encoding="utf-8")
+        document = document.replace(
+            "<head>",
+            '<head><meta http-equiv="Content-Security-Policy" content="'
+            + html.escape(csp, quote=True)
+            + '"><script>'
+            + bridge_script
+            + "</script>",
+        )
         return web.Response(
-            text=f'<iframe title="Plugin View" sandbox="allow-scripts allow-forms allow-downloads" '
-            f'src="{PREFIX}index.html#/catalog" style="border:0;width:100%;height:950px"></iframe>',
+            text='<iframe title="Plugin View" sandbox="allow-scripts" srcdoc="'
+            + html.escape(document, quote=True)
+            + '" style="border:0;width:100%;height:950px"></iframe>',
             content_type="text/html",
         )
 
@@ -188,17 +186,6 @@ async def check(*, maibot=False, sandbox_only=False):
     origin = f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"
     url = origin + PREFIX + "index.html"
     errors = []
-
-    async def media(route):
-        index = int(route.request.url.rsplit("/", 1)[1].split(".")[0])
-        colors = ["#ece8f7", "#f2e9da", "#dfede7", "#e4eaf4"]
-        words = ["确实", "开心", "吃瓜", "摸鱼", "收到", "疑惑", "晚安", "加油"]
-        svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="400" height="280">
-        <rect x="80" y="22" width="240" height="230" rx="60" fill="{colors[index % 4]}"/>
-        <circle cx="174" cy="102" r="5" fill="#5e566c"/><circle cx="226" cy="102" r="5" fill="#5e566c"/>
-        <path d="M175 133 Q200 152 225 133" fill="none" stroke="#5e566c" stroke-width="4" stroke-linecap="round"/>
-        <text x="200" y="202" text-anchor="middle" font-family="Microsoft YaHei,sans-serif" font-size="35" fill="#5e566c">{html.escape(words[index % 8])}</text></svg>'''
-        await route.fulfill(body=svg, content_type="image/svg+xml")
 
     try:
         async with async_playwright() as playwright:
@@ -215,7 +202,6 @@ async def check(*, maibot=False, sandbox_only=False):
                     ),
                 )
                 await page.add_init_script(bridge_script)
-                await page.route("https://r2.longhub.top/**", media)
                 if sandbox_only:
                     await page.goto(origin + "/sandbox.html")
                     await page.wait_for_timeout(1500)
@@ -517,60 +503,48 @@ async def check(*, maibot=False, sandbox_only=False):
                 await expect(page).to_have_url(url + "#/catalog")
                 await page.goto(origin + "/sandbox.html")
                 frame = page.frame_locator("iframe")
-                if maibot:
-                    await page.wait_for_timeout(500)
-                    if not await frame.locator('[data-tab="catalog"]').count():
-                        print("Sandbox errors:", errors)
-                        print("Sandbox body:", await frame.locator("body").inner_text())
-                    await frame.locator('[data-tab="catalog"]').click()
+                await page.wait_for_timeout(500)
+                if not await frame.locator('[data-tab="catalog"]').count():
+                    print("Sandbox errors:", errors)
+                    print("Sandbox body:", await frame.locator("body").inner_text())
+                await frame.locator('[data-tab="catalog"]').click()
                 await expect(frame.locator(".meme-card")).to_have_count(30)
-                if maibot:
-                    await expect(frame.locator(".card-image img").first).to_be_visible()
-                    assert (
-                        await page.locator("iframe").evaluate("el=>el.sandbox.value")
-                        == "allow-scripts"
-                    )
-                    assert await page.frames[1].evaluate("window.__maibotMax") <= 2
+                await expect(frame.locator(".card-image img").first).to_be_visible()
+                assert (
+                    await page.locator("iframe").evaluate("el=>el.sandbox.value") == "allow-scripts"
+                )
+                assert await page.frames[1].evaluate("window.__maibotMax") <= 2
                 await frame.locator(".card-image").first.click()
                 await expect(frame.locator("#manual-tags")).to_be_visible()
-                if maibot:
-                    await frame.locator("#manual-tags").fill("沙箱标签")
-                    await frame.get_by_role("button", name="保存修订", exact=True).click()
-                else:
-                    await frame.get_by_role("button", name="关闭", exact=True).click()
+                await frame.locator("#manual-tags").fill("沙箱标签")
+                await frame.get_by_role("button", name="保存修订", exact=True).click()
                 await expect(frame.get_by_role("dialog")).to_have_count(0)
-                if maibot:
-                    await frame.locator("#query").fill("摸鱼")
-                    await frame.locator('#search-form button[type="submit"]').click()
-                    await expect(frame.locator(".meme-card")).to_have_count(8)
-                    await frame.locator("#query").fill("")
-                    await frame.locator("#query").press("Enter")
-                    await expect(frame.locator(".meme-card")).to_have_count(30)
+                await frame.locator("#query").fill("摸鱼")
+                await frame.locator('#search-form button[type="submit"]').click()
+                await expect(frame.locator(".meme-card")).to_have_count(8)
+                await frame.locator("#query").fill("")
+                await frame.locator("#query").press("Enter")
+                await expect(frame.locator(".meme-card")).to_have_count(30)
                 await frame.locator('[data-tab="settings"]').click()
                 await expect(frame.locator("#settings-form")).to_be_visible()
-                if maibot:
-                    await frame.locator('[name="tagging_rpm"]').fill("11")
-                    await frame.locator('#settings-form button[type="submit"]').click()
-                    await expect(frame.locator(".notice")).to_contain_text("配置已保存")
-                    assert (await page.frames[1].evaluate("window.__lastSaved"))[
-                        "tagging_rpm"
-                    ] == 11
-                    await expect(frame.locator('[name="tagging_rpm"]')).to_have_value("11")
-                    await frame.locator('[data-tab="tasks"]').click()
-                    await frame.locator("#pause-tagging").click()
-                    await expect(frame.locator("#pause-tagging")).to_have_attribute(
-                        "aria-label", "继续标注队列"
-                    )
-                    await frame.locator("#rebuild-semantic").click()
-                    frame_reset_dialog = frame.get_by_role(
-                        "dialog", name="重置向量索引？", exact=True
-                    )
-                    await expect(frame_reset_dialog).to_be_visible()
-                    await frame_reset_dialog.get_by_role("button", name="取消", exact=True).click()
-                    await expect(frame_reset_dialog).to_have_count(0)
-                    assert not await page.frames[1].evaluate(
-                        "window.__calls.some(x=>x.method==='POST'&&x.path==='semantic/rebuild')"
-                    )
+                await frame.locator('[name="tagging_rpm"]').fill("11")
+                await frame.locator('#settings-form button[type="submit"]').click()
+                await expect(frame.locator(".notice")).to_contain_text("配置已保存")
+                assert (await page.frames[1].evaluate("window.__lastSaved"))["tagging_rpm"] == 11
+                await expect(frame.locator('[name="tagging_rpm"]')).to_have_value("11")
+                await frame.locator('[data-tab="tasks"]').click()
+                await frame.locator("#pause-tagging").click()
+                await expect(frame.locator("#pause-tagging")).to_have_attribute(
+                    "aria-label", "继续标注队列"
+                )
+                await frame.locator("#rebuild-semantic").click()
+                frame_reset_dialog = frame.get_by_role("dialog", name="重置向量索引？", exact=True)
+                await expect(frame_reset_dialog).to_be_visible()
+                await frame_reset_dialog.get_by_role("button", name="取消", exact=True).click()
+                await expect(frame_reset_dialog).to_have_count(0)
+                assert not await page.frames[1].evaluate(
+                    "window.__calls.some(x=>x.method==='POST'&&x.path==='semantic/rebuild')"
+                )
                 await frame.locator('[data-tab="overview"]').click()
                 await expect(frame.locator("#annotation-chart canvas")).to_be_visible()
                 await frame.get_by_role("button", name="语义查询可用", exact=True).hover()
@@ -628,7 +602,6 @@ async def check(*, maibot=False, sandbox_only=False):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--maibot", action="store_true")
     parser.add_argument("--sandbox-only", action="store_true")
     args = parser.parse_args()
-    asyncio.run(check(maibot=args.maibot, sandbox_only=args.sandbox_only))
+    asyncio.run(check(sandbox_only=args.sandbox_only))

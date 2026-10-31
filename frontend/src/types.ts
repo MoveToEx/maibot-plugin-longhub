@@ -118,11 +118,6 @@ export interface SettingsData {
   providers: { id: string; name: string }[];
   embedding_providers: { id: string; name: string }[];
 }
-export interface Bridge {
-  ready(): Promise<unknown>;
-  apiGet<T>(path: string, params?: Record<string, string | number>): Promise<T>;
-  apiPost<T>(path: string, body: unknown): Promise<T>;
-}
 export interface MaiBotBridge {
   ready: Promise<unknown>;
   query<T>(alias: string, args: Record<string, string>): Promise<T>;
@@ -132,7 +127,5 @@ export interface MaiBotBridge {
 declare global {
   interface Window {
     maibot?: MaiBotBridge;
-    AstrBotPluginView?: Bridge;
-    AstrBotPluginPage?: Bridge;
   }
 }

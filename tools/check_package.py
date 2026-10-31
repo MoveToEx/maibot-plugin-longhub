@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import asyncio
 import importlib.util
 import socket
@@ -34,6 +35,20 @@ async def check(archive):
                     ".pyc",
                 }
                 assert path.name not in {"main.py", "metadata.yaml", "_conf_schema.json"}
+                assert not {"maibot_adapter", ".astrbot-plugin", "tools"}.intersection(path.parts)
+                if path.suffix == ".py":
+                    tree = ast.parse(bundle.read(name).decode("utf-8"))
+                    for node in ast.walk(tree):
+                        imports = (
+                            [item.name for item in node.names]
+                            if isinstance(node, ast.Import)
+                            else [node.module or ""]
+                            if isinstance(node, ast.ImportFrom)
+                            else []
+                        )
+                        assert not any(
+                            module.split(".")[0] in {"astrbot", "faiss"} for module in imports
+                        )
             assert bundle.testzip() is None
             bundle.extractall(root)
         plugin_root = root / "maibot_plugin_longhub"
@@ -50,7 +65,7 @@ async def check(archive):
         plugin._set_context(
             PluginContext("movetoex.longhub", paths=PluginPaths(data, root / "runtime"))
         )
-        module = sys.modules["longhub_package_smoke.maibot_adapter.settings"]
+        module = sys.modules["longhub_package_smoke.runtime.settings"]
         with socket.socket() as reserve:
             reserve.bind(("127.0.0.1", 0))
             port = reserve.getsockname()[1]
@@ -65,7 +80,7 @@ async def check(archive):
         assert not any(name == "astrbot" or name.startswith("astrbot.") for name in sys.modules)
         assert len(plugin.get_components()) == 10
         print(
-            "ZIP smoke check passed: isolated SDK entry, 10 components, webhook startup, panel status, clean shutdown; no AstrBot import or image files"
+            "ZIP smoke check passed: isolated SDK entry, 10 components, webhook startup, panel status, clean shutdown; native SDK only, no image files"
         )
 
 
