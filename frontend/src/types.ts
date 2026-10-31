@@ -32,6 +32,11 @@ export interface Status {
     next_attempt: number;
   }[];
   ready: boolean;
+  configuration?: {
+    app_key_configured: boolean;
+    webhook_secret_configured: boolean;
+    webhook_ready: boolean;
+  };
   vision_configured: boolean;
   receiver: { started: boolean; error: string | null; listen: string; path: string };
   sync: {

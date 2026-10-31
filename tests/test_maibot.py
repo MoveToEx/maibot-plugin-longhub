@@ -526,3 +526,78 @@ async def test_start_and_stop_using_native_plugin_paths(tmp_path, unused_tcp_por
     assert (await plugin.panel_read("/status"))["receiver"]["started"]
     await plugin.on_unload()
     assert plugin.service is plugin.models is None
+
+
+@pytest.mark.parametrize("confirm_with_secrets", [False, True])
+async def test_save_credentials_and_confirm_subscription_survive_reload(
+    tmp_path, unused_tcp_port, monkeypatch, confirm_with_secrets
+):
+    started = asyncio.Event()
+
+    async def running_sync(service, *, force=False):
+        assert service.settings.ready
+        service.sync.status.update(status="running")
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(ADAPTER.Service, "_run_sync", running_sync)
+    settings_file = sys.modules["longhub_maibot_test.maibot_adapter.settings"].SettingsFile(
+        tmp_path
+    )
+    settings_file.save(Settings(webhook_port=unused_tcp_port, auto_tagging=False))
+    for reload in (False, True):
+        plugin, host = ENTRY.create_plugin(), Host()
+        host.plugin = plugin
+        plugin._set_context(
+            PluginContext("movetoex.longhub", host.rpc, PluginPaths(tmp_path, tmp_path / "runtime"))
+        )
+        await plugin.on_load()
+        try:
+            if not reload:
+                status = await plugin.panel_read("/status")
+                assert not status["ready"]
+                assert status["configuration"] == {
+                    "app_key_configured": False,
+                    "webhook_secret_configured": False,
+                    "webhook_ready": False,
+                }
+                assert plugin.service.sync_task is None
+                await plugin.panel_write(
+                    "/settings/save",
+                    json.dumps(
+                        {
+                            "app_key": "test-app-key",
+                            "webhook_secret": "test-hook-secret",
+                            "webhook_ready": confirm_with_secrets,
+                        }
+                    ),
+                )
+                status = await plugin.panel_read("/status")
+                assert status["ready"] is confirm_with_secrets
+                assert status["configuration"] == {
+                    "app_key_configured": True,
+                    "webhook_secret_configured": True,
+                    "webhook_ready": confirm_with_secrets,
+                }
+                assert "test-app-key" not in json.dumps(status)
+                assert "test-hook-secret" not in json.dumps(status)
+                if not confirm_with_secrets:
+                    assert plugin.service.sync_task is None
+                    with pytest.raises(ValueError, match="订阅"):
+                        await plugin.panel_write("/sync")
+                    await plugin.panel_write("/settings/save", '{"webhook_ready":true}')
+            status = await plugin.panel_read("/status")
+            assert status["ready"] and status["receiver"]["started"]
+            original_job = status["sync"]["id"]
+            job = await plugin.panel_write("/sync")
+            assert job["id"] == original_job
+            await asyncio.wait_for(started.wait(), 2)
+            persisted = settings_file.load()
+            assert persisted.ready and persisted.webhook_ready
+            assert (
+                persisted.app_key == "test-app-key"
+                and persisted.webhook_secret == "test-hook-secret"
+            )
+        finally:
+            await plugin.on_unload()
+        started.clear()

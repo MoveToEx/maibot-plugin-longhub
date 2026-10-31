@@ -202,6 +202,11 @@ class Service:
         return {
             **await self.db.stats(),
             "ready": self.settings.ready,
+            "configuration": {
+                "app_key_configured": bool(self.settings.app_key),
+                "webhook_secret_configured": bool(self.settings.webhook_secret),
+                "webhook_ready": self.settings.webhook_ready,
+            },
             "receiver": {
                 "started": self.webhook.started,
                 "error": self.webhook.error,

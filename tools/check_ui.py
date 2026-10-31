@@ -20,7 +20,8 @@ PREFIX = "/api/v1/plugins/longhub/views/catalog/_t/test-session/"
 BRIDGE = r"""
 (() => {
  const settings = SETTINGS;
- settings.app_key_configured = true; settings.webhook_secret_configured = true; settings.embedding_provider_id='embedding';
+ settings.app_key_configured = true; settings.webhook_secret_configured = true; settings.webhook_ready=true; settings.embedding_provider_id='embedding';
+ window.__settings=settings;
  const items = Array.from({length:65}, (_,i) => ({
   id:i===0?'9223372036854775807':String(i+1),
   text:['确实','开心','吃瓜','摸鱼','收到','疑惑','晚安','加油'][i%8],
@@ -32,6 +33,7 @@ BRIDGE = r"""
  }));
  const status={total:65,ratings:{none:58,moderate:7,violent:0},pending_notifications:2,
   tag_jobs:{queued:12,running:1,done:48,failed:4},tagging_paused:false,tagging_auto:false,ready:true,
+  configuration:{app_key_configured:true,webhook_secret_configured:true,webhook_ready:true},
   tag_queue:items.slice(0,5).map((item,i)=>({image_id:item.id,text:item.text,status:i===0?'running':'queued',attempts:0,next_attempt:0})),
   receiver:{started:true,error:null,listen:'127.0.0.1:8791',path:'/hooks/longhub'},
   sync:{status:'done'},last_sync:{completed_at:1792886400},last_webhook:1792886460,vision_configured:true,
@@ -79,12 +81,23 @@ BRIDGE = r"""
     item.effective_tags=[...new Set([...item.hub_tags,...item.ai_tags,...item.manual_tags])].filter(x=>!item.excluded_tags.includes(x));
     return structuredClone(item);
    }
-   if(path==='settings/save'){window.__lastSaved=structuredClone(body);Object.assign(settings,body);return {saved:true};}
+   if(path==='settings/save'){
+    window.__lastSaved=structuredClone(body);
+    const {app_key,webhook_secret,...safe}=body;Object.assign(settings,safe);
+    if(app_key!==undefined)settings.app_key_configured=!!app_key.trim();
+    if(webhook_secret!==undefined)settings.webhook_secret_configured=!!webhook_secret.trim();
+    status.configuration={app_key_configured:settings.app_key_configured,webhook_secret_configured:settings.webhook_secret_configured,webhook_ready:settings.webhook_ready};
+    status.ready=settings.app_key_configured&&settings.webhook_secret_configured&&settings.webhook_ready;
+    return {saved:true,settings:structuredClone(settings)};
+   }
    if(path==='tagging/pause'){status.tagging_paused=body.paused;return {paused:body.paused};}
    if(path==='tagging/auto'){status.tagging_auto=body.enabled;return {enabled:body.enabled};}
    if(path==='semantic/pause'){status.semantic.paused=body.paused;return {paused:body.paused};}
    if(path==='tagging/enqueue')return {queued:body.ids?.length||16};
-   if(path==='sync')return {id:'test-sync',status:'queued'};
+   if(path==='sync'){
+    if(!status.ready||!status.receiver.started)throw new Error('尚未完成同步配置');
+    return {id:'test-sync',status:'queued'};
+   }
    if(path==='webhook/retry')return {queued:true};
    if(path==='semantic/rebuild'){
     status.semantic.indexed=0;status.semantic.pending=status.semantic.annotated;status.semantic.available=false;
@@ -429,7 +442,9 @@ async def check(*, maibot=False, sandbox_only=False):
                 await page.locator('[data-tab="settings"]').click()
                 await page.locator('[name="tagging_rpm"]').fill("9")
                 await page.locator('[name="embedding_rpm"]').fill("12")
-                await page.get_by_role("switch", name="已在 LONG Hub 启用订阅", exact=True).click()
+                subscription = page.get_by_role("switch", name="已在 LONG Hub 启用订阅", exact=True)
+                if not await subscription.is_checked():
+                    await subscription.click()
                 await page.get_by_role("checkbox", name="允许 violent", exact=True).uncheck()
                 await page.get_by_role("combobox", name="视觉标注提供商", exact=True).click()
                 await page.get_by_role("option", name="暂不启用视觉标注", exact=True).click()
@@ -505,7 +520,10 @@ async def check(*, maibot=False, sandbox_only=False):
                 if maibot:
                     await frame.locator('[name="tagging_rpm"]').fill("11")
                     await frame.locator('#settings-form button[type="submit"]').click()
-                    await page.frames[1].wait_for_function("window.__lastSaved?.tagging_rpm === 11")
+                    await expect(frame.locator(".notice")).to_contain_text("配置已保存")
+                    assert (await page.frames[1].evaluate("window.__lastSaved"))[
+                        "tagging_rpm"
+                    ] == 11
                     await expect(frame.locator('[name="tagging_rpm"]')).to_have_value("11")
                     await frame.locator('[data-tab="tasks"]').click()
                     await frame.locator("#pause-tagging").click()
@@ -518,6 +536,45 @@ async def check(*, maibot=False, sandbox_only=False):
                 await expect(frame.get_by_role("tooltip")).to_contain_text(
                     "上下文明确相关时优先使用"
                 )
+                # First-time setup must identify the missing subscription confirmation,
+                # retain both secrets during its sparse save, and reach a real sync call.
+                await page.frames[1].evaluate("""() => {
+                    Object.assign(window.__settings,{app_key_configured:false,webhook_secret_configured:false,webhook_ready:false});
+                    Object.assign(window.__status,{ready:false,configuration:{app_key_configured:false,webhook_secret_configured:false,webhook_ready:false}});
+                }""")
+                await frame.locator("#refresh").click()
+                await expect(frame.locator("#sync-panel")).to_contain_text(
+                    "Appkey、Webhook 签名密钥"
+                )
+                await expect(
+                    frame.get_by_role("button", name="立即校准", exact=True)
+                ).to_be_disabled()
+                await frame.locator('[data-tab="settings"]').click()
+                await frame.locator('[name="app_key"]').fill("test-app-key")
+                await frame.locator('[name="webhook_secret"]').fill("test-hook-secret")
+                await expect(
+                    frame.get_by_role("switch", name="已在 LONG Hub 启用订阅", exact=True)
+                ).not_to_be_checked()
+                await frame.locator('#settings-form button[type="submit"]').click()
+                await expect(frame.locator('[name="app_key"]')).to_have_value("")
+                assert (await page.frames[1].evaluate("window.__lastSaved"))[
+                    "app_key"
+                ] == "test-app-key"
+                await frame.locator('[data-tab="overview"]').click()
+                await expect(frame.locator("#connection-state")).to_have_text("待确认订阅")
+                await expect(frame.locator("#sync-panel")).to_contain_text("密钥已保存")
+                await frame.get_by_role("button", name="确认订阅并校准", exact=True).click()
+                await expect(frame.locator("#connection-state")).to_have_text("已连接接收器")
+                assert await page.frames[1].evaluate(
+                    "window.__calls.some(x=>x.method==='POST'&&x.path==='sync') && window.__status.ready"
+                )
+                assert await page.frames[1].evaluate("window.__lastSaved") == {
+                    "webhook_ready": True
+                }
+                await expect(frame.locator("#connection-state")).to_have_text("已连接接收器")
+                await expect(
+                    frame.get_by_role("button", name="立即校准", exact=True)
+                ).to_be_enabled()
                 assert not errors, errors
                 print(
                     "SPA checks passed: overview layout/pie/tooltip/updates/empty, routes/history/reload, filters/pagination, edits/int64/XSS, selections, retry, logs/tasks/settings, dark/mobile, sandbox iframe"

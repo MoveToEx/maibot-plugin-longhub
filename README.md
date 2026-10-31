@@ -1,6 +1,6 @@
 # LONG Hub · MaiBot 龙图插件
 
-此分支将 AstrBot LONG Hub 插件迁移到 MaiBot，版本 **0.6.0**。原 AstrBot 0.5.1 代码保留在 `main` 分支。当前分支的安装入口为 `plugin.py`，发行 ZIP 只包含 MaiBot 运行所需文件。
+此分支将 AstrBot LONG Hub 插件迁移到 MaiBot，版本 **0.6.1**。原 AstrBot 0.5.1 代码保留在 `main` 分支。当前分支的安装入口为 `plugin.py`，发行 ZIP 只包含 MaiBot 运行所需文件。
 
 同步 LONG Hub 目录、补全视觉标注，通过语义、标签 SQL 或文字寻找表情。图片从 S3 兼容的 R2 存储按需读取，发送、GIF 抽帧和 WebUI 缩略图均在内存中处理，不创建本地图片库。
 
@@ -18,7 +18,7 @@
 1. 解压发行 ZIP，把 `maibot_plugin_longhub` 目录放入 MaiBot 的 `plugins/`。让宿主安装 manifest 声明的 Python 依赖；手工部署时也可使用 `uv pip install --python <Runner的Python> -r requirements.txt`。
 2. 在 MaiBot 插件配置中设置 `[plugin] enabled = true`，重载插件。启用开关由宿主管理，其余业务配置通过 LONG Hub 管理页面保存到插件数据目录的 `settings.json`。
 3. 打开 MaiBot WebUI 的 **LONG Hub** 页面，在「连接与设置」填写 Appkey、webhook 密钥和监听地址。默认接收地址为 `127.0.0.1:8791/hooks/longhub`。Docker 部署需把监听地址改为 `0.0.0.0` 并映射端口。
-4. 用反向代理把公网 HTTPS webhook 地址转发到上述接收器，在 LONG Hub 完成订阅后开启「已在 LONG Hub 启用订阅」。后台才会发起初次全量同步，避免同步期间遗漏通知。
+4. 用反向代理把公网 HTTPS webhook 地址转发到上述接收器，在 LONG Hub 完成订阅后开启「已在 LONG Hub 启用订阅」。也可保存密钥后，在概览点击「确认订阅并校准」：它会保留已有密钥、保存订阅确认并启动校准。未确认时会明确显示「待确认订阅」，缺少密钥或接收器未启动时会说明具体原因。后台仅在订阅确认后发起初次全量同步，避免同步期间遗漏通知。
 5. 视觉标注选择原生支持图片的 MaiBot 模型任务（例如 `vlm`）；语义检索选择 `embedding`。请在宿主中先配置对应模型。
 
 管理 API 只通过 MaiBot 已认证的页面桥接开放。8791 端口仅接收带签名的 webhook，不提供匿名管理页面。项目没有指定代理，默认使用部署环境的网络。

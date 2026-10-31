@@ -198,8 +198,18 @@ function SettingsForm({ data, reload }: { data: SettingsData; reload: () => void
         payload.image_hosts = splitTags(String(form.get('image_hosts') ?? ''));
         payload.allowed_ratings = form.getAll('ratings');
         run(async () => {
-          await api.post('settings/save', payload);
-          notify('配置已保存，后台服务已重新启动。');
+          const saved = await api.post<{ settings?: SettingsData['settings'] }>(
+            'settings/save',
+            payload,
+          );
+          const settings = saved.settings;
+          notify(
+            settings?.app_key_configured &&
+              settings.webhook_secret_configured &&
+              !settings.webhook_ready
+              ? '密钥已保存。请在概览中确认 webhook 订阅并开始校准。'
+              : '配置已保存，后台服务已重新启动。',
+          );
           reload();
           refresh();
         });
