@@ -134,6 +134,11 @@ async def mai(db, image, tmp_path):
 def test_real_sdk_registration_and_required_parameters():
     plugin = ENTRY.create_plugin()
     components = {item["name"]: item for item in plugin.get_components()}
+    # Without core_tool metadata MaiBot defers plugin tools behind tool_search,
+    # so the per-reply search policy cannot call them on an ordinary first turn.
+    for component in components.values():
+        if component["type"] == "TOOL":
+            assert component["metadata"]["core_tool"] is True
     assert set(components) == {
         "search_longhub_memes",
         "query_longhub_memes_sql",

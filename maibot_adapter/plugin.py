@@ -155,6 +155,7 @@ class LongHubPlugin(MaiBotPlugin):
 
     @Tool(
         "search_longhub_memes",
+        core_tool=True,
         description="标签无合适结果或难提取标签时，按图片文字、描述回退搜索龙图；每轮实际搜索后选择贴切候选。",
         parameters={
             "query": {
@@ -184,6 +185,7 @@ class LongHubPlugin(MaiBotPlugin):
 
     @Tool(
         "query_longhub_memes_sql",
+        core_tool=True,
         description="只读 SQL 搜索龙图。表 memes(id TEXT,text,rating,description,tags,annotation_fresh)、meme_tags(image_id TEXT,tag)。优先按中英多标签 IN/OR 并行匹配；英文小写下划线，如 genshin_impact/原神。仅 SELECT/WITH，结果为候选，不自动发送。",
         parameters={
             "sql": {
@@ -211,7 +213,8 @@ class LongHubPlugin(MaiBotPlugin):
 
     @Tool(
         "search_longhub_memes_semantic",
-        description="有意义的聊天上下文与期望表情明确相关时，按概念语义寻找龙图候选。仅标注覆盖率 >50% 且索引完整时开放。不自动发送，相似度不是概率。核对候选后决定发送。",
+        core_tool=True,
+        description="有意义的聊天上下文与期望表情明确相关时，按概念、情绪或互动意图寻找龙图候选。仅标注覆盖率 >50% 且索引完整时开放。按语境核对候选，选出贴切图片后用 reply 回复扩展或 send_longhub_meme 发送；相似度不是概率。",
         parameters={
             "concept": {
                 "type": "string",
@@ -278,6 +281,7 @@ class LongHubPlugin(MaiBotPlugin):
 
     @Tool(
         "send_longhub_meme",
+        core_tool=True,
         description="只发送一张已检索到的龙图并结束本轮，不追加文字或确认。图中文字已完整表达本轮意思时倾向使用此工具。需要配文与前后排序时，改用 reply 的 movetoex.longhub.meme 回复扩展。",
         parameters={"image_id": IDENT},
         timeout_ms=60000,
@@ -314,7 +318,7 @@ class LongHubPlugin(MaiBotPlugin):
 
     @ReplyExtension(
         "meme",
-        description="为当前回复附加已检索到的一张龙图，自主选择文字前/后，或只发图。每轮最多一张，不重复已发送图。",
+        description="普通聊天检索到贴切龙图时优先使用：为本次回复附加一张图，自主选择文字前/后，或只发图。每轮最多一张，不重复已发送图。",
         parameters={
             "image_id": IDENT,
             "position": {"type": "string", "enum": ["before", "after"], "default": "before"},

@@ -1,6 +1,6 @@
 # LONG Hub · MaiBot 龙图插件
 
-此分支将 AstrBot LONG Hub 插件迁移到 MaiBot，版本 **0.6.3**。原 AstrBot 0.5.1 代码保留在 `main` 分支。当前分支的安装入口为 `plugin.py`，发行 ZIP 只包含 MaiBot 运行所需文件。
+此分支将 AstrBot LONG Hub 插件迁移到 MaiBot，版本 **0.6.4**。原 AstrBot 0.5.1 代码保留在 `main` 分支。当前分支的安装入口为 `plugin.py`，发行 ZIP 只包含 MaiBot 运行所需文件。
 
 同步 LONG Hub 目录、补全视觉标注，通过语义、标签 SQL 或文字寻找表情。图片从 S3 兼容的 R2 存储按需读取，发送、GIF 抽帧和 WebUI 缩略图均在内存中处理，不创建本地图片库。
 
@@ -28,6 +28,7 @@
 ## 聊天行为
 
 - 决定参与对话后，提示模型每轮实际调用合适的检索工具，再判断候选是否贴切；旁听或等待时不要求搜索。
+- 四个龙图工具作为核心工具直接提供给 Planner，无需先调用 `tool_search`；语义工具仍按索引就绪状态隐藏或开放。普通聊天按情绪、语气和互动意图选图，不要求用户先索图，也不要求图片复现全部话题细节。
 - 当上下文有意义且回应明确相关时，标注覆盖率 **严格 >50%**、当前索引完整后优先使用语义检索。否则按标签 SQL 检索，再回退到图片文字/描述。
 - 标签查询同时使用英文下划线标签与中文同义词，通过 IN/OR 扩大匹配，例如 `genshin_impact`/`原神`。模型可以通过只读 SQL 精确查找，数据库写操作、文件访问与任意扩展均被禁止。
 - 配文使用 `reply` 的 `plugin_options["movetoex.longhub.meme"]`：`image_id`、`position: "before" | "after"`、`only_image: boolean`。图在文本前后由模型选择。

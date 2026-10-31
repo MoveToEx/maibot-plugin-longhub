@@ -17,6 +17,7 @@ import json
 import sys
 import types
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -61,6 +62,28 @@ def validate(source):
 
     plugin = load("longhub_contract_plugin", ROOT / "plugin.py", package=True).create_plugin()
     components = {item["name"]: item for item in plugin.get_components()}
+    # Exercise the host's own visibility projection on real SDK registrations.
+    path = runtime / "component_query.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    query_class = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "ComponentQueryService"
+    )
+    visibility = next(
+        node
+        for node in query_class.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_get_tool_visibility"
+    )
+    visibility.decorator_list = []
+    namespace = {}
+    exec(compile(ast.Module(body=[visibility], type_ignores=[]), str(path), "exec"), namespace)
+    for item in components.values():
+        if item["type"] == "TOOL":
+            assert (
+                namespace["_get_tool_visibility"](SimpleNamespace(metadata=item["metadata"]))
+                == "visible"
+            )
     declared_apis = {item["name"] for item in components.values() if item["type"] == "API"}
     for page in extension.pages:
         for binding in [*page.queries.values(), *page.actions.values()]:
@@ -116,7 +139,7 @@ def validate(source):
     ]
     assert namespace["validate_reply_messages"](messages) == messages
     print(
-        f"MaiBot native contracts passed: {manifest.id} {manifest.version}; manifest v2, WebUI v2/bindings, reply schema/messages, Context Item roundtrip"
+        f"MaiBot native contracts passed: {manifest.id} {manifest.version}; manifest v2, WebUI v2/bindings, core tool visibility, reply schema/messages, Context Item roundtrip"
     )
 
 

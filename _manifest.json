@@ -2,7 +2,7 @@
   "manifest_version": 2,
   "id": "movetoex.longhub",
   "name": "LONG Hub 龙图",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "description": "同步 LONG Hub 远程表情目录，支持多模态标注、语义/标签/SQL 检索与原生回复扩展。图片仅在内存中处理。",
   "author": {"name": "MoveToEx", "url": "https://example.invalid/MoveToEx"},
   "license": "MIT",
