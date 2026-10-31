@@ -1,6 +1,6 @@
 # LONG Hub · MaiBot 龙图插件
 
-此分支将 AstrBot LONG Hub 插件迁移到 MaiBot，版本 **0.6.1**。原 AstrBot 0.5.1 代码保留在 `main` 分支。当前分支的安装入口为 `plugin.py`，发行 ZIP 只包含 MaiBot 运行所需文件。
+此分支将 AstrBot LONG Hub 插件迁移到 MaiBot，版本 **0.6.2**。原 AstrBot 0.5.1 代码保留在 `main` 分支。当前分支的安装入口为 `plugin.py`，发行 ZIP 只包含 MaiBot 运行所需文件。
 
 同步 LONG Hub 目录、补全视觉标注，通过语义、标签 SQL 或文字寻找表情。图片从 S3 兼容的 R2 存储按需读取，发送、GIF 抽帧和 WebUI 缩略图均在内存中处理，不创建本地图片库。
 
@@ -81,7 +81,7 @@ uv run python -m tools.package
 
 浏览器检查使用系统 Edge，仅运行内存中的桥接和图片测试数据。`views/maibot/index.html` 已预构建在发行包中。`npm run build -- --mode astrbot` 可另行构建历史面板以运行原 AstrBot 回归检查。`tools/check_maibot_contract.py` 可对照指定 MaiBot 源码校验原生声明和上下文协议。
 
-目前完成本地 SDK/数据库/发送回执与浏览器沙箱验证，尚未部署到实际 MaiBot/QQ 实例进行端到端验收。
+已完成本地 SDK、数据库、发送回执与浏览器沙箱验证，并在服务器上的 MaiBot 验证了旧图库标注导入、WebUI 和文本检索。真实 QQ 图片发送尚未单独完成端到端验收。
 
 插件尚未确定公开仓库，manifest 的 `https://example.invalid/maibot_plugin_longhub` 是明确的占位地址，不是可用下载来源，发布前需要替换。
 
