@@ -17,6 +17,10 @@ class Turn:
     searched: bool = False
     receipt: str = ""
     context_only: bool = False
+    anchor: str = ""
+    replied: bool = False
+    logical_turn_id: str = ""
+    reply_baseline: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -59,15 +63,20 @@ class Deliveries:
         self.reply_ids = OrderedDict()
         self.context_requests = {}
 
-    def enter(self, session, key):
+    def enter(self, session, key, completed=()):
         self._prune()
         previous = self.turns.get(session)
-        if previous is None or previous.key != key:
-            previous = Turn(key)
+        context_requested = self.context_requests.pop(session, 0) > time.monotonic()
+        if context_requested or previous is None or (key and previous.anchor != key):
+            previous = Turn(
+                uuid.uuid4().hex if context_requested else key,
+                anchor=key,
+                context_only=context_requested,
+                reply_baseline=set(completed) if context_requested else set(),
+            )
             self.turns[session] = previous
-        if self.context_requests.get(session, 0) > time.monotonic():
-            previous.context_only = True
-            self.context_requests.pop(session, None)
+        if set(completed) - previous.reply_baseline:
+            previous.replied = True
         self.turns.move_to_end(session)
         return previous
 
@@ -120,6 +129,9 @@ class Deliveries:
                 receipt.status = "failed"
                 continue
             receipt.status = "confirmed"
+            turn = self.turns.get(session)
+            if turn is not None and turn.key == receipt.turn:
+                turn.replied = True
             # The IM send already happened. Finish recording its fact even when the
             # caller cancels its RPC after receiving a host-side send timeout.
             task = asyncio.create_task(

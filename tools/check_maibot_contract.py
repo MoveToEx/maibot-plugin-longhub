@@ -111,6 +111,33 @@ def validate(source):
         restored = snapshots.deserialize_context_item_snapshot(item)
         assert snapshots.serialize_context_item_snapshot(restored) == item
 
+    # Completion guards emit real model-output items, including the text-only case.
+    for original in (
+        [],
+        [
+            {
+                "item_type": "FunctionCallItem",
+                "meta": {
+                    "item_id": "duplicate-reply",
+                    "logical_turn_id": "current-turn",
+                    "timestamp": "2026-11-01T12:00:00+00:00",
+                },
+                "tool_call": {
+                    "call_id": "duplicate-call",
+                    "func_name": "reply",
+                    "args": {"msg_id": "old"},
+                },
+            }
+        ],
+    ):
+        for item in policy.stop_output(original, "current-turn"):
+            restored = snapshots.deserialize_context_item_snapshot(item)
+            assert snapshots.serialize_context_item_snapshot(restored) == item
+            assert (
+                restored.tool_call.func_name == "stop"
+                and restored.tool_call.materialize_args() == {}
+            )
+
     # The two pure native send validators have no host lifecycle dependencies.
     path = runtime / "host" / "reply_extensions.py"
     tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -139,7 +166,7 @@ def validate(source):
     ]
     assert namespace["validate_reply_messages"](messages) == messages
     print(
-        f"MaiBot native contracts passed: {manifest.id} {manifest.version}; manifest v2, WebUI v2/bindings, core tool visibility, reply schema/messages, Context Item roundtrip"
+        f"MaiBot native contracts passed: {manifest.id} {manifest.version}; manifest v2, WebUI v2/bindings, core tool visibility, reply schema/messages, completion-stop/context roundtrip"
     )
 
 

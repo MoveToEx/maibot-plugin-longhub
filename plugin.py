@@ -16,7 +16,14 @@ from .backend.service import Service
 from .runtime.delivery import Deliveries, PreparedReply, check_frame
 from .runtime.models import Models
 from .runtime.panel import Panel
-from .runtime.policy import SEARCH_POLICY, inject, turn_key
+from .runtime.policy import (
+    COMPLETED_POLICY,
+    SEARCH_POLICY,
+    inject,
+    single_reply_output,
+    stop_output,
+    turn_context,
+)
 from .runtime.settings import PluginConfig, SettingsFile
 
 LIMIT = {"type": "integer", "minimum": 1, "maximum": 10, "default": 5}
@@ -125,7 +132,21 @@ class LongHubPlugin(MaiBotPlugin):
             or not all(isinstance(item, dict) for item in items)
         ):
             return {}
-        turn = self.deliveries.enter(session, turn_key(items))
+        anchor, completed = turn_context(items)
+        turn = self.deliveries.enter(session, anchor, completed)
+        if turn.replied:
+            for item in reversed(items):
+                logical = item.get("meta", {}).get("logical_turn_id")
+                if item.get("call_id") in completed and isinstance(logical, str) and logical:
+                    turn.logical_turn_id = logical
+                    break
+            kwargs["tool_definitions"] = [
+                definition
+                for definition in kwargs.get("tool_definitions", [])
+                if definition.get("function", {}).get("name") == "stop"
+            ]
+            kwargs["items"] = inject(items, COMPLETED_POLICY)
+            return {"action": "continue", "modified_kwargs": kwargs}
         semantic = await service.semantic.status()
         definitions = kwargs.get("tool_definitions", [])
         available = bool(semantic["available"])
@@ -151,6 +172,46 @@ class LongHubPlugin(MaiBotPlugin):
         if turn.context_only:
             text += "\n用户本轮使用 /l：根据已有话题与情绪选一张龙图，以纯图回应，不询问需求，不把 /l 当检索词。先搜索，再使用 send_longhub_meme 结束本轮。"
         kwargs["items"] = inject(items, text)
+        return {"action": "continue", "modified_kwargs": kwargs}
+
+    @HookHandler(
+        "maisaka.planner.after_response",
+        mode=HookMode.BLOCKING,
+        order=HookOrder.LATE,
+        timeout_ms=5000,
+    )
+    async def planner_completion_guard(self, **kwargs):
+        if self.service is None or kwargs.get("item_schema_version") != 1:
+            return {}
+        items = kwargs.get("output_items")
+        if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
+            return {}
+        session = kwargs.get("session_id", "")
+        turn = self.deliveries.turns.get(session)
+        if turn is None:
+            return {}
+        logical = next(
+            (
+                item.get("meta", {}).get("logical_turn_id")
+                for item in items
+                if item.get("meta", {}).get("logical_turn_id")
+            ),
+            None,
+        )
+        if isinstance(logical, str) and logical:
+            turn.logical_turn_id = logical
+        if turn.replied:
+            updated = stop_output(items, turn.logical_turn_id)
+            self.ctx.logger.info(
+                "LONG Hub completed reply: session=%s anchor=%s; stopping Planner continuation",
+                session,
+                turn.anchor,
+            )
+        else:
+            updated = single_reply_output(items)
+        if updated == items:
+            return {}
+        kwargs["output_items"] = updated
         return {"action": "continue", "modified_kwargs": kwargs}
 
     @Tool(

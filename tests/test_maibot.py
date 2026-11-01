@@ -38,6 +38,8 @@ SEMANTIC = sys.modules["longhub_maibot_test.backend.semantic"].SemanticIndex
 
 
 def snapshot(ident="user-1", *, kind="UserMessageItem", text="好开心"):
+    if kind == "UserMessageItem":
+        text = f'<message msg_id="{ident}" time="12:00:00" user="群友">\n' + text
     return {
         "item_type": kind,
         "meta": {
@@ -145,6 +147,7 @@ def test_real_sdk_registration_and_required_parameters():
         "meme",
         "longhub_context",
         "planner_policy",
+        "planner_completion_guard",
         "track_delivery",
         "panel_read",
         "panel_write",
