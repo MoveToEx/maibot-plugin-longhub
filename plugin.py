@@ -24,6 +24,7 @@ from .runtime.policy import (
     stop_output,
     turn_context,
 )
+from .runtime.reply_guard import reply_context, strip_metadata
 from .runtime.settings import PluginConfig, SettingsFile
 
 LIMIT = {"type": "integer", "minimum": 1, "maximum": 10, "default": 5}
@@ -114,6 +115,51 @@ class LongHubPlugin(MaiBotPlugin):
             row["image_id"]
             for row in await self.require_service().db.recent_sent_memes(session, "maibot", 20)
         ]
+
+    @HookHandler(
+        "maisaka.replyer.before_model_request",
+        mode=HookMode.BLOCKING,
+        order=HookOrder.LATE,
+        timeout_ms=5000,
+    )
+    async def replyer_context(self, **kwargs):
+        service = self.service
+        if service is None or kwargs.get("item_schema_version") != 1:
+            return {}
+        session, items = kwargs.get("session_id", ""), kwargs.get("items")
+        if (
+            not session
+            or not isinstance(items, list)
+            or not all(isinstance(i, dict) for i in items)
+        ):
+            return {}
+        recent = await service.db.recent_sent_memes(session, "maibot", 5)
+        kwargs["items"] = reply_context(items, recent)
+        return {"action": "continue", "modified_kwargs": kwargs}
+
+    @HookHandler(
+        "maisaka.reply.before_post_process",
+        mode=HookMode.BLOCKING,
+        order=HookOrder.LATE,
+        timeout_ms=5000,
+    )
+    async def reply_metadata_guard(self, **kwargs):
+        response = kwargs.get("response")
+        if self.service is None or not isinstance(response, str):
+            return {}
+        args = kwargs.get("reply_tool_args")
+        options = args.get("plugin_options") if isinstance(args, dict) else None
+        meme_reply = isinstance(options, dict) and "movetoex.longhub.meme" in options
+        cleaned = strip_metadata(response, meme_reply=meme_reply)
+        if cleaned == response:
+            return {}
+        self.ctx.logger.info(
+            "LONG Hub reply metadata removed before splitting: session=%s removed_chars=%s",
+            kwargs.get("session_id", ""),
+            len(response) - len(cleaned),
+        )
+        kwargs["response"] = cleaned
+        return {"action": "continue", "modified_kwargs": kwargs}
 
     @HookHandler(
         "maisaka.planner.before_request",
@@ -409,7 +455,7 @@ class LongHubPlugin(MaiBotPlugin):
                 )
                 self.deliveries._prune()
                 return {
-                    "extra_prompt": "本轮将由 LONG Hub 附加一张龙图，正文不重复图片已有表达，不写发送确认。"
+                    "extra_prompt": "本轮将由 LONG Hub 附加一张龙图，正文不重复图片已有表达，不写发送确认，也不输出内部图片 ID、回执、发送标记或表情元数据 JSON。"
                 }
             prepared = self.deliveries.reply_ids.get(reply_id)
             if prepared is None:

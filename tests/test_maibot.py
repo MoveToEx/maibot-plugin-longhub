@@ -148,6 +148,8 @@ def test_real_sdk_registration_and_required_parameters():
         "longhub_context",
         "planner_policy",
         "planner_completion_guard",
+        "replyer_context",
+        "reply_metadata_guard",
         "track_delivery",
         "panel_read",
         "panel_write",

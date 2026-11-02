@@ -111,6 +111,55 @@ def validate(source):
         restored = snapshots.deserialize_context_item_snapshot(item)
         assert snapshots.serialize_context_item_snapshot(restored) == item
 
+    protocol = load(package.__name__ + ".context_protocol", payload / "context_protocol.py")
+    # Use the host's deserializer unchanged, without importing its live services.
+    path = runtime / "hook_payloads.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    tree.body = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "deserialize_prompt_items"
+    ]
+    context_types = sys.modules[package.__name__ + ".context_item"]
+    namespace = {
+        "Any": Any,
+        "List": list,
+        "Sequence": list,
+        "ContextItem": context_types.ContextItem,
+        "CONTEXT_ITEM_SCHEMA_VERSION": 1,
+        "ContextProtocolMode": protocol.ContextProtocolMode,
+        "validate_context_items": protocol.validate_context_items,
+        "serialize_context_item_snapshot": snapshots.serialize_context_item_snapshot,
+        "deserialize_context_item_snapshot": snapshots.deserialize_context_item_snapshot,
+    }
+    exec(compile(tree, str(path), "exec"), namespace)
+    guard = sys.modules["longhub_contract_plugin.runtime.reply_guard"]
+    original_payloads = [
+        {
+            "item_type": kind,
+            "meta": {
+                "item_id": ident,
+                "logical_turn_id": None,
+                "timestamp": "2026-11-02T00:00:00Z",
+            },
+            "parts": [{"type": "text", "text": text}],
+            **({"phase": None} if kind == "AssistantMessageItem" else {}),
+        }
+        for kind, ident, text in [
+            ("UserMessageItem", "human", "普通消息"),
+            (
+                "AssistantMessageItem",
+                "assistant",
+                '正文[LONG Hub 已发送龙图 1] {"image_id":"1","text":"信了"}',
+            ),
+        ]
+    ]
+    original = snapshots.deserialize_context_items_snapshot(original_payloads)
+    sanitized = guard.reply_context(original_payloads, [{"text": "信了", "description": "怀疑"}])
+    restored = namespace["deserialize_prompt_items"](sanitized, original_items=original)
+    assert restored[1] is original[0] and restored[2] is not original[1]
+    assert snapshots.serialize_context_item_snapshot(restored[2])["parts"][0]["text"] == "正文"
+
     # Completion guards emit real model-output items, including the text-only case.
     for original in (
         [],
@@ -166,7 +215,7 @@ def validate(source):
     ]
     assert namespace["validate_reply_messages"](messages) == messages
     print(
-        f"MaiBot native contracts passed: {manifest.id} {manifest.version}; manifest v2, WebUI v2/bindings, core tool visibility, reply schema/messages, completion-stop/context roundtrip"
+        f"MaiBot native contracts passed: {manifest.id} {manifest.version}; manifest v2, WebUI v2/bindings, core tool visibility, reply schema/messages, completion-stop/context roundtrip, Replyer metadata cleanup/native deserializer"
     )
 
 

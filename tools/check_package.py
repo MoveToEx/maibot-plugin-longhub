@@ -78,9 +78,9 @@ async def check(archive):
         finally:
             await plugin.on_unload()
         assert not any(name == "astrbot" or name.startswith("astrbot.") for name in sys.modules)
-        assert len(plugin.get_components()) == 11
+        assert len(plugin.get_components()) == 13
         print(
-            "ZIP smoke check passed: isolated SDK entry, 11 components, webhook startup, panel status, clean shutdown; native SDK only, no image files"
+            "ZIP smoke check passed: isolated SDK entry, 13 components, webhook startup, panel status, clean shutdown; native SDK only, no image files"
         )
 
 
