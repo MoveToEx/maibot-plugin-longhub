@@ -1,6 +1,6 @@
 [project]
 name = "maibot-plugin-longhub"
-version = "0.7.2"
+version = "0.7.3"
 description = "A webhook-synchronized, remote-only LONG Hub meme catalog for MaiBot"
 requires-python = ">=3.12"
 dependencies = [

@@ -321,28 +321,30 @@ class LongHubPlugin(MaiBotPlugin):
     @Tool(
         "search_longhub_memes_semantic",
         core_tool=True,
-        description="有意义的聊天上下文与期望表情明确相关时，按概念、情绪或互动意图寻找龙图候选。仅标注覆盖率 >50% 且索引完整时开放。按语境核对候选，选出贴切图片后用 reply 回复扩展或 send_longhub_meme 发送；相似度不是概率。",
+        description="有意义的聊天上下文与期望表情明确相关时，提炼多个短关键词分别语义检索，不要输入整句。各词结果取并集，同一图片取最高相似度，统一降序后返回最多 limit 张。仅标注覆盖率 >50% 且索引完整时开放。按语境核对候选后用 reply 回复扩展或 send_longhub_meme 发送；相似度不是概率。",
         parameters={
-            "concept": {
-                "type": "string",
+            "keywords": {
+                "type": "array",
                 "required": True,
-                "minLength": 1,
-                "maxLength": 1000,
-                "description": "想表达的概念、情绪或场景，1–1000 字",
+                "minItems": 2,
+                "maxItems": 6,
+                "uniqueItems": True,
+                "items": {"type": "string", "minLength": 1, "maxLength": 40},
+                "description": '提炼 2–6 个不同的短关键词或短语，每个 1–40 字，如 ["嘴硬", "被拆穿", "委屈"]；不要输入完整句子、回复草稿或聊天记录。每个词独立检索，匹配任意一个即可入选。',
             },
             "limit": LIMIT,
         },
     )
-    async def search_semantic(self, concept, limit=5, stream_id="", **kwargs):
+    async def search_semantic(self, keywords, limit=5, stream_id="", **kwargs):
         del kwargs
-        self.log_tool("search_longhub_memes_semantic", concept=concept, limit=limit)
+        self.log_tool("search_longhub_memes_semantic", keywords=keywords, limit=limit)
         async with self.lifecycle_lock:
             service = self.require_service()
             self._limit(limit, 10)
             turn = self.deliveries.current(stream_id)
             try:
                 items = await service.semantic.search(
-                    concept, limit, recent=await self._recent(stream_id)
+                    keywords, limit, recent=await self._recent(stream_id)
                 )
                 turn.searched = True
                 return {

@@ -108,26 +108,35 @@ class SQLiteVectorStore:
 
     async def search(self, concept, vector, count):
         del concept
-        if len(vector) != self.dimension:
-            raise SemanticError("查询向量维度无效")
-        return await asyncio.to_thread(self._search, vector, count)
+        return (await self.search_many([vector], count))[0]
 
-    def _search(self, query, count):
-        best = []
+    async def search_many(self, vectors, count):
+        if any(len(vector) != self.dimension for vector in vectors):
+            raise SemanticError("查询向量维度无效")
+        return await asyncio.to_thread(self._search_many, vectors, count)
+
+    def _search_many(self, queries, count):
+        # Scan and decode each stored vector once, keeping a bounded heap per keyword.
+        heaps = [[] for _ in queries]
         with Session(self.engine) as session:
             for row in session.scalars(select(Vector).execution_options(yield_per=128)):
                 values = self._decode(row.data)
-                similarity = max(
-                    -1.0, min(1.0, math.fsum(a * b for a, b in zip(query, values, strict=True)))
-                )
-                candidate = (similarity, row.image_id, row.fingerprint)
-                if len(best) < count:
-                    heapq.heappush(best, candidate)
-                elif candidate > best[0]:
-                    heapq.heapreplace(best, candidate)
+                for query, best in zip(queries, heaps, strict=True):
+                    similarity = max(
+                        -1.0,
+                        min(1.0, math.fsum(a * b for a, b in zip(query, values, strict=True))),
+                    )
+                    candidate = (similarity, row.image_id, row.fingerprint)
+                    if len(best) < count:
+                        heapq.heappush(best, candidate)
+                    elif candidate > best[0]:
+                        heapq.heapreplace(best, candidate)
         return [
-            {"image_id": ident, "fingerprint": fingerprint, "similarity": similarity}
-            for similarity, ident, fingerprint in sorted(best, reverse=True)
+            [
+                {"image_id": ident, "fingerprint": fingerprint, "similarity": similarity}
+                for similarity, ident, fingerprint in sorted(best, reverse=True)
+            ]
+            for best in heaps
         ]
 
     async def close(self):

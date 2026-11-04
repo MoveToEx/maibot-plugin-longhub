@@ -368,9 +368,17 @@ class SemanticIndex:
         self.wakeup.set()
         return {"paused": paused}
 
-    async def search(self, concept, limit=5, recent=()):
-        if not isinstance(concept, str) or not concept.strip() or len(concept) > 1000:
-            raise SemanticError("请输入 1–1000 字的自然语言概念或使用场景")
+    async def search(self, keywords, limit=5, recent=()):
+        if not isinstance(keywords, list) or not 2 <= len(keywords) <= 6:
+            raise SemanticError("keywords 须为包含 2–6 个短关键词的数组，不要输入整句")
+        if any(
+            not isinstance(keyword, str) or not 1 <= len(keyword.strip()) <= 40
+            for keyword in keywords
+        ):
+            raise SemanticError("每个关键词须为 1–40 字的非空短词或短语")
+        keywords = list(dict.fromkeys(keyword.strip() for keyword in keywords))
+        if len(keywords) < 2:
+            raise SemanticError("请提供至少两个不同的短关键词")
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10:
             raise SemanticError("limit 须为 1–10 的整数")
         if not (await self.status())["available"]:
@@ -378,7 +386,8 @@ class SemanticIndex:
                 "语义检索尚未就绪：需配置 Embedding、有效标注覆盖率严格超过 50% 且索引完整；可暂用标签或文字检索"
             )
         store, embeddings, profile = self.store, self.embeddings, self.profile
-        vector = await embeddings.embed(concept.strip())
+        # Embed each keyword independently; never concatenate or average their vectors.
+        vectors = await embeddings.embed_many(keywords)
         async with self.index_lock:
             if (
                 store is not self.store
@@ -387,36 +396,42 @@ class SemanticIndex:
                 or not (await self.status())["available"]
             ):
                 raise SemanticError("目录或 Embedding 提供商已更新，请稍后重试或暂用标签检索")
-            results = await store.search(
-                concept.strip(), vector, min(len(self.entries), max(20, limit * 4))
+            result_sets = await store.search_many(
+                vectors, min(len(self.entries), max(20, limit * 4))
             )
-        # Re-read candidates after the external request, including enable/rating/freshness.
-        ids = [result["image_id"] for result in results]
+        # Re-read the union after external requests, including enable/rating/freshness.
+        results = [result for matches in result_sets for result in matches]
+        ids = list(dict.fromkeys(result["image_id"] for result in results))
         current = {
             doc["id"]: doc
             for row in await self.db.semantic_catalog(self.settings.allowed_ratings, ids)
             if (doc := document(row)) is not None
         }
-        items = []
+        best = {}
         for result in results:
-            doc = current.get(result["image_id"])
+            ident = result["image_id"]
+            doc = current.get(ident)
             score = result["similarity"]
             if (
                 doc
                 and doc["fingerprint"] == result["fingerprint"]
+                and not isinstance(score, bool)
                 and isinstance(score, (int, float))
                 and math.isfinite(score)
             ):
-                items.append(
-                    {key: doc[key] for key in ("id", "text", "rating", "description", "tags")}
-                    | {
-                        "similarity": round(max(-1.0, min(1.0, score)), 4),
-                        "recently_sent": doc["id"] in recent,
-                    }
-                )
+                # Multiple keyword hits are one candidate, scored by its strongest match.
+                best[ident] = max(best.get(ident, -1.0), max(-1.0, min(1.0, score)))
         if not (await self.status())["available"]:
             raise SemanticError("目录正在更新，语义索引暂不可用，请稍后重试或使用标签检索")
-        return items[:limit]
+        ranked = sorted(best, key=lambda ident: (-best[ident], int(ident)))[:limit]
+        return [
+            {key: current[ident][key] for key in ("id", "text", "rating", "description", "tags")}
+            | {
+                "similarity": round(best[ident], 4),
+                "recently_sent": ident in recent,
+            }
+            for ident in ranked
+        ]
 
     async def close(self):
         async with self.index_lock:

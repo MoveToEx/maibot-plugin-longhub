@@ -1,7 +1,7 @@
 import copy
 import math
 from dataclasses import replace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -9,6 +9,7 @@ from backend.embeddings import Embeddings
 from backend.errors import SemanticError
 from backend.models import Settings
 from backend.semantic import SemanticIndex
+from backend.vector_store import SQLiteVectorStore
 from tests.conftest import publish
 
 
@@ -67,7 +68,10 @@ class Factory:
             async def delete(self, ident):
                 rows.pop(ident, None)
 
-            async def search(self, concept, vector, count):
+            async def search_many(self, vectors, count):
+                return [await self.search(vector, count) for vector in vectors]
+
+            async def search(self, vector, count):
                 scored = [
                     {
                         "image_id": ident,
@@ -117,17 +121,123 @@ async def test_strict_coverage_gate_and_semantic_best_match(db, image, tmp_path)
     status = await engine.status()
     assert status["coverage"] == 0.5 and not status["available"]
     with pytest.raises(SemanticError):
-        await engine.search("开心的回应")
-    assert not provider.query_calls
+        await engine.search(["开心", "happy"])
+    assert not provider.query_calls and len(provider.batch_calls) == 1
     await annotate(db, 3, "惊讶")
     assert not (await engine.status())["available"]  # New annotation still needs a vector.
     await engine.run_once()
     assert (await engine.status())["available"]
-    result = await engine.search("开心的回应", recent=["1"])
+    result = await engine.search(["开心", "happy"], recent=["1"])
     assert result[0]["id"] == "1" and result[0]["similarity"] == 1
     assert result[0]["recently_sent"] and "image_url" not in result[0]
-    assert len(provider.batch_calls) == 2 and len(provider.query_calls) == 1
+    assert len(provider.batch_calls) == 3 and provider.batch_calls[-1] == ["开心", "happy"]
+    assert not provider.query_calls
     await engine.close()
+
+
+async def test_keyword_union_keeps_highest_score_then_limits_globally(db, image, tmp_path):
+    engine, provider, _ = await setup(db, image, tmp_path)
+    await engine.run_once()
+
+    def hit(ident, score):
+        return {
+            "image_id": ident,
+            "fingerprint": engine.entries[ident],
+            "similarity": score,
+        }
+
+    engine.store.search_many = AsyncMock(
+        return_value=[
+            [hit("3", 0.95), hit("1", 0.91003)],
+            [hit("2", 0.91004), hit("1", 0.80)],
+        ]
+    )
+    result = await engine.search(["开心", "难过"], limit=3, recent=["2"])
+    assert [item["id"] for item in result] == ["3", "2", "1"]
+    assert [item["similarity"] for item in result] == [0.95, 0.91, 0.91]
+    assert result[1]["recently_sent"] and not result[0]["recently_sent"]
+    assert provider.batch_calls[-1] == ["开心", "难过"] and not provider.query_calls
+    assert engine.store.search_many.await_args.args[0] == [[1.0, 0, 0], [0, 1.0, 0]]
+    limited = await engine.search(["开心", "难过"], limit=2)
+    assert [item["id"] for item in limited] == ["3", "2"]
+    await engine.close()
+
+
+async def test_keyword_whitespace_and_duplicates_do_not_repeat_embedding(db, image, tmp_path):
+    engine, provider, _ = await setup(db, image, tmp_path)
+    await engine.run_once()
+    result = await engine.search([" 开心 ", "难过", "开心"])
+    assert provider.batch_calls[-1] == ["开心", "难过"]
+    # Exact score ties are deterministic and independent of keyword order.
+    assert [item["id"] for item in result] == ["1", "2", "3"]
+    reverse = await engine.search(["难过", "开心"])
+    assert reverse == result
+    await engine.close()
+
+
+@pytest.mark.parametrize(
+    "keywords",
+    [
+        "想找一张表达开心心情的龙图",
+        None,
+        {},
+        [],
+        ["开心"],
+        ["1", "2", "3", "4", "5", "6", "7"],
+        ["开心", ""],
+        ["开心", "   "],
+        ["开心", 1],
+        ["开心", True],
+        ["开心", "长" * 41],
+        ["开心", " 开心 "],
+    ],
+)
+async def test_invalid_keyword_arrays_are_rejected_before_embedding(db, image, tmp_path, keywords):
+    engine, provider, _ = await setup(db, image, tmp_path)
+    await engine.run_once()
+    before = len(provider.batch_calls)
+    with pytest.raises(SemanticError):
+        await engine.search(keywords)
+    assert len(provider.batch_calls) == before and not provider.query_calls
+    await engine.close()
+
+
+async def test_keyword_union_discards_invalid_and_stale_scores(db, image, tmp_path):
+    engine, _, _ = await setup(db, image, tmp_path)
+    await engine.run_once()
+    engine.store.search_many = AsyncMock(
+        return_value=[
+            [
+                {"image_id": "1", "fingerprint": engine.entries["1"], "similarity": math.nan},
+                {"image_id": "2", "fingerprint": "obsolete", "similarity": 1.0},
+            ],
+            [
+                {"image_id": "1", "fingerprint": engine.entries["1"], "similarity": True},
+                {"image_id": "3", "fingerprint": engine.entries["3"], "similarity": math.inf},
+            ],
+        ]
+    )
+    assert await engine.search(["开心", "难过"]) == []
+    await engine.close()
+
+
+async def test_sqlite_multi_query_returns_each_keywords_candidates_in_one_scan(tmp_path):
+    store = SQLiteVectorStore(tmp_path / "vectors", 3)
+    await store.initialize()
+    try:
+        documents = [{"id": str(i), "fingerprint": str(i) * 64} for i in range(1, 5)]
+        await store.insert(documents, [[1, 0, 0], [0, 1, 0], [0.8, 0.6, 0], [0.6, 0.8, 0]])
+        store._decode = Mock(wraps=store._decode)
+        groups = await store.search_many([[1, 0, 0], [0, 1, 0]], 2)
+        assert [[hit["image_id"] for hit in group] for group in groups] == [["1", "3"], ["2", "4"]]
+        assert store._decode.call_count == 4
+        assert groups[0][0]["similarity"] == groups[1][0]["similarity"] == 1.0
+        assert groups[0][1]["similarity"] == pytest.approx(0.8)
+        assert (await store.search("开心", [1, 0, 0], 1))[0]["image_id"] == "1"
+        with pytest.raises(SemanticError, match="维度"):
+            await store.search_many([[1, 0, 0], [1, 0]], 2)
+    finally:
+        await store.close()
 
 
 async def test_stale_visual_and_hub_only_do_not_count_but_manual_annotations_do(
@@ -164,7 +274,8 @@ async def test_index_removes_disabled_deleted_and_changed_items_and_ignores_stag
     assert not (await engine.status())["available"]
     await engine.run_once()
     assert "1" not in engine.entries
-    assert all(item["id"] != "1" for item in await engine.search("开心"))
+    assert all(item["id"] != "1" for item in await engine.search(["开心", "happy"]))
+    original_calls = len(provider.batch_calls)
     await db.update_override(2, {"description": "人工改成开心"})
     await engine.run_once()
     assert len(provider.batch_calls) == original_calls + 1
@@ -303,9 +414,9 @@ async def test_query_rechecks_catalog_after_embedding_request(db, image, tmp_pat
     async def disable():
         await db.update_override(1, {"enabled": False})
 
-    provider.on_query = disable
+    provider.on_batch = disable
     with pytest.raises(SemanticError, match="更新"):
-        await engine.search("开心")
+        await engine.search(["开心", "happy"])
     await engine.close()
 
 
@@ -333,7 +444,8 @@ async def test_embedding_pause_keeps_search_and_persists_reset_until_resume(db, 
     calls = len(provider.batch_calls)
     await engine.set_paused(True)
     assert (await engine.status())["paused"] and (await engine.status())["available"]
-    assert (await engine.search("开心"))[0]["id"] == "1"
+    assert (await engine.search(["开心", "happy"]))[0]["id"] == "1"
+    calls = len(provider.batch_calls)
     await db.update_override(4, {"description": "新标注"})
     await engine.run_once()
     assert len(provider.batch_calls) == calls and (await engine.status())["pending"] == 1

@@ -16,7 +16,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
+from jsonschema import ValidationError, validate
 from maibot_sdk.context import PluginContext, PluginPaths
+from maibot_sdk.types import ToolComponentInfo
 from PIL import Image
 
 from backend.models import Settings
@@ -158,6 +160,7 @@ def test_real_sdk_registration_and_required_parameters():
         ("send_longhub_meme", "image_id"),
         ("search_longhub_memes", "query"),
         ("query_longhub_memes_sql", "sql"),
+        ("search_longhub_memes_semantic", "keywords"),
         ("meme", "image_id"),
     ]:
         metadata = components[name]["metadata"]
@@ -273,6 +276,46 @@ async def test_confirmed_receipt_finishes_persisting_when_caller_is_cancelled(ma
         await plugin.send_image_only("2", stream_id="chat-a")
 
 
+@pytest.mark.parametrize(
+    "arguments,valid",
+    [
+        ({"keywords": ["嘴硬", "被拆穿", "委屈"], "limit": 5}, True),
+        ({"concept": "表达被拆穿之后嘴硬又委屈的情绪"}, False),
+        ({"keywords": "嘴硬，被拆穿，委屈"}, False),
+        ({"keywords": ["开心"]}, False),
+        ({"keywords": ["开心", "开心"]}, False),
+        ({"keywords": ["开心", ""]}, False),
+        ({"keywords": ["开心", "长" * 41]}, False),
+    ],
+)
+def test_semantic_tool_exposes_keyword_array_schema(arguments, valid):
+    component = next(
+        item for item in ENTRY.create_plugin().get_components()
+        if item["name"] == "search_longhub_memes_semantic"
+    )
+    schema = ToolComponentInfo(name=component["name"], **component["metadata"]).get_parameters_schema()
+    assert "keywords" in schema["required"] and "concept" not in schema["properties"]
+    if valid:
+        validate(arguments, schema)
+    else:
+        with pytest.raises(ValidationError):
+            validate(arguments, schema)
+
+
+async def test_semantic_tool_logs_keywords_and_passes_global_limit(mai, caplog):
+    plugin, _ = mai
+    expected = [{"id": "1", "similarity": 0.91, "recently_sent": False}]
+    plugin.service.semantic.search = AsyncMock(return_value=expected)
+    keywords = ["嘴硬", "被拆穿", "委屈"]
+    with caplog.at_level(logging.INFO):
+        result = await plugin.search_semantic(keywords, limit=3, stream_id="chat-a")
+    plugin.service.semantic.search.assert_awaited_once_with(keywords, 3, recent=[])
+    assert json.loads(result["content"]) == {"items": expected, "method": "embedding"}
+    assert plugin.deliveries.current("chat-a").searched
+    assert "search_longhub_memes_semantic" in caplog.text and "keywords" in caplog.text
+    assert all(keyword in caplog.text for keyword in keywords)
+
+
 async def test_semantic_errors_log_details_without_secrets(mai, caplog):
     plugin, _ = mai
     plugin.service.settings = replace(plugin.service.settings, app_key="hub-secret")
@@ -283,7 +326,7 @@ async def test_semantic_errors_log_details_without_secrets(mai, caplog):
         side_effect=RuntimeError("upstream failure: hub-secret provider-secret")
     )
     with caplog.at_level(logging.ERROR):
-        result = await plugin.search_semantic("开心", stream_id="chat-a")
+        result = await plugin.search_semantic(["开心", "高兴"], stream_id="chat-a")
     assert result["success"] is False and "secret" not in json.dumps(result)
     assert "upstream failure" in caplog.text and "Traceback" in caplog.text
     assert "hub-secret" not in caplog.text and "provider-secret" not in caplog.text
@@ -412,7 +455,7 @@ async def test_sqlite_vectors_semantic_gate_persistence_and_updates(mai, tmp_pat
     try:
         await index.run_once()
         assert (await index.status())["available"]
-        result = await index.search("开心", 2)
+        result = await index.search(["开心", "happy"], 2)
         assert result[0]["id"] == "1" and result[0]["similarity"] == pytest.approx(1.0)
         directory = index.directory
         await index.close()
@@ -423,7 +466,7 @@ async def test_sqlite_vectors_semantic_gate_persistence_and_updates(mai, tmp_pat
         assert not (await index.status())["available"]  # Exactly 50% coverage.
         await db.update_override(3, {"description": "难过"})
         await index.run_once()
-        assert all(row["id"] != "1" for row in await index.search("开心", 5))
+        assert all(row["id"] != "1" for row in await index.search(["开心", "happy"], 5))
         assert all(
             path.suffix in {".sqlite3", ".json"} or path.name.startswith("catalog.sqlite3-")
             for path in tmp_path.rglob("*")
@@ -639,7 +682,7 @@ async def test_maibot_06_vector_cache_upgrade_checks_model_and_reuses_vectors(
         calls = [args for name, args in host.calls if name == "llm.embed"]
         assert len(calls) == (0 if reuse else 1)
         assert (await db.get_meta("semantic_cache"))["profile"] != old_profile
-        assert (await index.search("开心"))[0]["id"] == "1"
+        assert (await index.search(["开心", "happy"]))[0]["id"] == "1"
     finally:
         await index.close()
         await models.close()
