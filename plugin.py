@@ -26,7 +26,7 @@ from .runtime.policy import (
     stop_output,
     turn_context,
 )
-from .runtime.reply_guard import reply_context, strip_metadata
+from .runtime.reply_guard import reply_context, sent_context, strip_metadata
 from .runtime.settings import PluginConfig, SettingsFile
 
 LIMIT = {"type": "integer", "minimum": 1, "maximum": 10, "default": 5}
@@ -152,7 +152,9 @@ class LongHubPlugin(MaiBotPlugin):
         args = kwargs.get("reply_tool_args")
         options = args.get("plugin_options") if isinstance(args, dict) else None
         meme_reply = isinstance(options, dict) and "movetoex.longhub.meme" in options
-        cleaned = strip_metadata(response, meme_reply=meme_reply)
+        turn = self.deliveries.turns.get(kwargs.get("session_id", ""))
+        catalog_reply = meme_reply or bool(turn and turn.searched)
+        cleaned = strip_metadata(response, meme_reply=catalog_reply)
         if cleaned == response:
             return {}
         self.ctx.logger.info(
@@ -193,7 +195,7 @@ class LongHubPlugin(MaiBotPlugin):
                 for definition in kwargs.get("tool_definitions", [])
                 if definition.get("function", {}).get("name") == "stop"
             ]
-            kwargs["items"] = inject(items, COMPLETED_POLICY)
+            kwargs["items"] = inject(sent_context(items, []), COMPLETED_POLICY)
             return {"action": "continue", "modified_kwargs": kwargs}
         semantic = await service.semantic.status()
         definitions = kwargs.get("tool_definitions", [])
@@ -209,10 +211,7 @@ class LongHubPlugin(MaiBotPlugin):
         )
         text += "\n本轮搜索状态：" + ("已检索" if turn.searched else "尚未检索")
         recent = await service.db.recent_sent_memes(session, "maibot", 5)
-        if recent:
-            text += "\n已确认发送的近期龙图事实（历史，不是本轮候选）：" + json.dumps(
-                recent, ensure_ascii=False
-            )
+        items = sent_context(items, recent)
         if turn.receipt:
             receipt = self.deliveries.receipts.get(turn.receipt)
             if receipt and receipt.status == "confirmed":
@@ -416,6 +415,7 @@ class LongHubPlugin(MaiBotPlugin):
                     raise
                 result = {"success": True}
             if receipt.status != "confirmed":
+                receipt.status = "failed"
                 return {
                     "success": False,
                     "error": "没有收到所选龙图的原生发送成功回执，请勿声称已发送或重复重试",

@@ -135,12 +135,12 @@ def single_reply_output(items):
     return result
 
 
-def inject(items, text, *, policy_id=POLICY_ID):
+def inject(items, text, *, policy_id=POLICY_ID, item_type="SystemMessageItem"):
     updated = [deepcopy(item) for item in items if item.get("meta", {}).get("item_id") != policy_id]
     updated.insert(
         0,
         {
-            "item_type": "SystemMessageItem",
+            "item_type": item_type,
             "meta": {
                 "item_id": policy_id,
                 "logical_turn_id": None,

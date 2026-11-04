@@ -157,8 +157,9 @@ def validate(source):
     original = snapshots.deserialize_context_items_snapshot(original_payloads)
     sanitized = guard.reply_context(original_payloads, [{"text": "信了", "description": "怀疑"}])
     restored = namespace["deserialize_prompt_items"](sanitized, original_items=original)
-    assert restored[1] is original[0] and restored[2] is not original[1]
-    assert snapshots.serialize_context_item_snapshot(restored[2])["parts"][0]["text"] == "正文"
+    assert restored[2] is original[0] and restored[3] is not original[1]
+    assert snapshots.serialize_context_item_snapshot(restored[3])["parts"][0]["text"] == "正文"
+    assert snapshots.serialize_context_item_snapshot(restored[1])["item_type"] == "UserMessageItem"
 
     # Completion guards emit real model-output items, including the text-only case.
     for original in (

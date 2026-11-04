@@ -60,6 +60,7 @@ class Host:
         self.model = "embedding-test"
         self.failure = False
         self.send_mode = "success"
+        self.send_count = 0
 
     async def rpc(self, method, plugin_id, payload, **kwargs):
         assert method == "cap.call" and plugin_id == "movetoex.longhub"
@@ -97,6 +98,8 @@ class Host:
         if capability == "send.text":
             return self.send_mode != "failed"
         if capability == "send.hybrid":
+            self.send_count += 1
+            message_id = f"qq-receipt-{self.send_count}"
             assert args["sync_to_maisaka_history"] is True
             assert args["maisaka_source_kind"] == "guided_reply"
             segments = [dict(segment) for segment in args["segments"]]
@@ -107,12 +110,16 @@ class Host:
             elif self.send_mode == "wrong-session":
                 args = args | {"stream_id": "other-chat"}
             await self.plugin.track_delivery(
-                message={"session_id": args["stream_id"], "raw_message": segments},
+                message={
+                    "session_id": args["stream_id"],
+                    "message_id": message_id,
+                    "raw_message": segments,
+                },
                 sent=self.send_mode != "failed",
             )
             if self.send_mode == "post-send-error":
                 raise RuntimeError("host history append failed after confirmed IM delivery")
-            return {"success": self.send_mode != "failed", "message_id": "qq-receipt-1"}
+            return {"success": self.send_mode != "failed", "message_id": message_id}
         raise AssertionError(capability)
 
 
@@ -362,6 +369,7 @@ async def test_reply_extension_order_and_only_image(mai, position, only, expecte
     await plugin.track_delivery(
         message={
             "session_id": "chat-a",
+            "message_id": "native-reply-1",
             "raw_message": next(
                 message["segments"]
                 for message in output

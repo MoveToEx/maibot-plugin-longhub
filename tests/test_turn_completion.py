@@ -147,7 +147,11 @@ async def test_meme_receipt_and_turn_survive_host_self_echo_and_tail(mai):
         phase="before_send", parameters=params, reply_id="reply-1", session_id="chat-a", messages=[]
     )
     await plugin.track_delivery(
-        message={"session_id": "chat-a", "raw_message": prepared["messages"][0]["segments"]},
+        message={
+            "session_id": "chat-a",
+            "message_id": "native-reply-1",
+            "raw_message": prepared["messages"][0]["segments"],
+        },
         sent=True,
     )
     assert turn.replied and plugin.deliveries.receipts[turn.receipt].status == "confirmed"

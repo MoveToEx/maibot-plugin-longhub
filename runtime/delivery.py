@@ -10,6 +10,8 @@ import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
 
+from .reply_guard import meme_label
+
 
 @dataclass
 class Turn:
@@ -33,13 +35,12 @@ class Receipt:
     created: float = field(default_factory=time.monotonic)
     digest: str = ""
     label: str = ""
+    message_id: str = ""
     status: str = "prepared"
 
     def segment(self, data, encoded):
         self.digest = hashlib.sha256(data).hexdigest()
-        self.label = f"[LONG Hub 已发送龙图 {self.image_id}；回执 {self.id}] " + json.dumps(
-            self.details, ensure_ascii=False
-        )
+        self.label = meme_label(self.details)
         return {
             "type": "emoji",
             "data": self.label,
@@ -62,6 +63,7 @@ class Deliveries:
         self.receipts = OrderedDict()
         self.reply_ids = OrderedDict()
         self.context_requests = {}
+        self.completed_messages = OrderedDict()
 
     def enter(self, session, key, completed=()):
         self._prune()
@@ -87,11 +89,17 @@ class Deliveries:
         return value
 
     def reserve(self, session, item):
+        self._prune()
         turn = self.current(session)
         if turn.receipt:
             existing = self.receipts.get(turn.receipt)
             if existing is not None and existing.status != "failed":
                 raise ValueError("本轮已经准备或发送过一张龙图，请勿重复发送")
+        if any(
+            receipt.session == session and receipt.status in {"prepared", "attempted", "attached"}
+            for receipt in self.receipts.values()
+        ):
+            raise ValueError("当前会话还有龙图等待发送确认，请稍后重试")
         receipt = Receipt(
             session,
             turn.key,
@@ -110,11 +118,19 @@ class Deliveries:
 
     async def confirm(self, message, sent, db):
         session = message.get("session_id")
+        message_id = message.get("message_id")
         segments = message.get("raw_message", [])
-        if not session or not isinstance(segments, list):
+        if (
+            not session
+            or not isinstance(message_id, str)
+            or not message_id
+            or not isinstance(segments, list)
+            or (session, message_id) in self.completed_messages
+        ):
             return
-        for receipt in list(self.receipts.values()):
-            if receipt.session != session or receipt.status in {"confirmed", "failed"}:
+        matches = []
+        for receipt in self.receipts.values():
+            if receipt.session != session or receipt.status not in {"attempted", "attached"}:
                 continue
             matching = any(
                 segment.get("type") == "emoji"
@@ -125,23 +141,29 @@ class Deliveries:
             )
             if not matching:
                 continue
-            if sent is not True:
-                receipt.status = "failed"
-                continue
-            receipt.status = "confirmed"
-            turn = self.turns.get(session)
-            if turn is not None and turn.key == receipt.turn:
-                turn.replied = True
-            # The IM send already happened. Finish recording its fact even when the
-            # caller cancels its RPC after receiving a host-side send timeout.
-            task = asyncio.create_task(
-                db.record_sent_meme(session, "maibot", receipt.id, receipt.details)
-            )
-            try:
-                await asyncio.shield(task)
-            except asyncio.CancelledError:
-                await task
-                raise
+            matches.append(receipt)
+        if len(matches) != 1:
+            return
+        receipt = matches[0]
+        self.completed_messages[(session, message_id)] = time.monotonic()
+        receipt.message_id = message_id
+        if sent is not True:
+            receipt.status = "failed"
+            return
+        receipt.status = "confirmed"
+        turn = self.turns.get(session)
+        if turn is not None and turn.key == receipt.turn:
+            turn.replied = True
+        # The IM send already happened. Finish recording its fact even when the
+        # caller cancels its RPC after receiving a host-side send timeout.
+        task = asyncio.create_task(
+            db.record_sent_meme(session, "maibot", receipt.id, receipt.details)
+        )
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await task
+            raise
 
     def _prune(self):
         now = time.monotonic()
@@ -153,6 +175,11 @@ class Deliveries:
                 mapping.popitem(last=False)
         while len(self.receipts) > 1024:
             self.receipts.popitem(last=False)
+        for key, created in list(self.completed_messages.items()):
+            if now - created > 600:
+                self.completed_messages.pop(key, None)
+        while len(self.completed_messages) > 2048:
+            self.completed_messages.popitem(last=False)
         self.context_requests = {
             key: expiry for key, expiry in self.context_requests.items() if expiry > now
         }
