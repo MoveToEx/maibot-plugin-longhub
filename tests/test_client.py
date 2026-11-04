@@ -219,3 +219,93 @@ async def test_metadata_query_handles_fragmented_json(serve, image):
 def test_image_url_allowlist(url):
     with pytest.raises(ValueError):
         HubClient(Settings()).validate_image_url(url)
+
+
+@pytest.mark.parametrize("empty", [False, True])
+async def test_health_reads_one_metadata_page_and_uses_current_auth(serve, image, empty):
+    seen = []
+
+    async def handler(request):
+        seen.append((request.path, dict(request.query), dict(request.headers)))
+        return web.json_response(
+            {
+                "error": None,
+                "data": {"total": 0 if empty else 1, "images": [] if empty else [image()]},
+            }
+        )
+
+    app = web.Application()
+    app.router.add_get("/image", handler)
+    client = HubClient(Settings(api_base=await serve(app), app_key="health-secret"))
+    await client.open()
+    try:
+        await client.healthcheck()
+        assert len(seen) == 1 and seen[0][0] == "/image"
+        assert seen[0][1] == {"limit": "1", "offset": "0"}
+        assert seen[0][2]["Authorization"] == "Key health-secret"
+        assert seen[0][2]["Accept-Encoding"] == "identity"
+    finally:
+        await client.close()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [],
+        {"error": "upstream error", "data": {"total": 1, "images": []}},
+        {"error": None, "data": []},
+        {"error": None, "data": {"images": []}},
+        {"error": None, "data": {"total": True, "images": []}},
+        {"error": None, "data": {"total": -1, "images": []}},
+        {"error": None, "data": {"total": 0, "images": {}}},
+        {"error": None, "data": {"total": 1, "images": ["invalid metadata"]}},
+    ],
+)
+async def test_health_rejects_invalid_image_list_envelopes(serve, payload):
+    app = web.Application()
+
+    async def handler(request):
+        return web.json_response(payload)
+
+    app.router.add_get("/image", handler)
+    client = HubClient(Settings(api_base=await serve(app)))
+    await client.open()
+    try:
+        with pytest.raises(ValueError):
+            await client.healthcheck()
+    finally:
+        await client.close()
+
+
+@pytest.mark.parametrize("failure", ["http", "redirect", "html", "invalid_json", "oversize"])
+async def test_health_rejects_error_pages_redirects_and_oversized_responses(serve, failure):
+    followed = []
+
+    async def handler(request):
+        if failure == "http":
+            return web.Response(status=503, text="private upstream response health-secret")
+        if failure == "redirect":
+            return web.Response(status=302, headers={"Location": "/other"})
+        if failure == "html":
+            return web.Response(text="<html>not an API response</html>", content_type="text/html")
+        if failure == "invalid_json":
+            return web.Response(text="not-json", content_type="application/json")
+        return web.Response(body=b" " * (256 * 1024 + 1), content_type="application/json")
+
+    async def other(request):
+        followed.append(True)
+        return web.json_response({"error": None, "data": {"total": 0, "images": []}})
+
+    app = web.Application()
+    app.router.add_get("/image", handler)
+    app.router.add_get("/other", other)
+    client = HubClient(Settings(api_base=await serve(app)))
+    await client.open()
+    try:
+        with pytest.raises((HubError, ValueError)) as raised:
+            await client.healthcheck()
+        assert not followed and "health-secret" not in str(raised.value)
+        if failure == "http":
+            assert raised.value.status == 503
+    finally:
+        await client.close()

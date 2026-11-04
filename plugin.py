@@ -10,10 +10,12 @@ import time
 from maibot_sdk import API, Command, HookHandler, MaiBotPlugin, ReplyExtension, Tool
 from maibot_sdk.types import HookMode, HookOrder
 
+from .backend.client import HubClient
 from .backend.errors import error_details, safe_error
 from .backend.models import image_id
 from .backend.service import Service
 from .runtime.delivery import Deliveries, PreparedReply, check_frame
+from .runtime.health import health_report
 from .runtime.models import Models
 from .runtime.panel import Panel
 from .runtime.policy import (
@@ -501,6 +503,29 @@ class LongHubPlugin(MaiBotPlugin):
                 "LONG Hub delivery receipt persistence failed: %s", safe_error(exc)
             )
         return {}
+
+    @Command(
+        "longhub_health",
+        description="检测机器人、LLM 和 LONG Hub API 是否在线，并报告 API 调用延迟",
+        pattern=r"^/health\s*$",
+        intercept_message_level=2,
+        timeout_ms=45000,
+    )
+    async def health(self, stream_id="", **kwargs):
+        del kwargs
+        if not stream_id:
+            raise ValueError("缺少当前会话")
+        # Diagnostics must not queue behind chat tools or use a session being reconfigured.
+        client = HubClient(self.require_service().settings)
+        try:
+            await client.open()
+            report = await health_report(self.ctx, client)
+        finally:
+            await client.close()
+        sent = await self.ctx.send.text(report, stream_id, sync_to_maisaka_history=False)
+        if not sent:
+            raise RuntimeError("健康检查结果发送失败")
+        return True, None, True
 
     @Command(
         "longhub_context",

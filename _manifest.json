@@ -2,7 +2,7 @@
   "manifest_version": 2,
   "id": "movetoex.longhub",
   "name": "LONG Hub 龙图",
-  "version": "0.7.3",
+  "version": "0.7.4",
   "description": "同步 LONG Hub 远程表情目录，支持多模态标注、语义/标签/SQL 检索与原生回复扩展。图片仅在内存中处理。",
   "author": {"name": "MoveToEx", "url": "https://github.com/MoveToEx"},
   "license": "MIT",
@@ -21,6 +21,6 @@
     {"type": "python_package", "name": "greenlet", "version_spec": ">=3,<4"},
     {"type": "python_package", "name": "pillow", "version_spec": ">=11.2.1"}
   ],
-  "capabilities": ["send.hybrid", "llm.generate", "llm.embed", "llm.get_available_models", "maisaka.proactive.trigger"],
+  "capabilities": ["send.text", "send.hybrid", "llm.generate", "llm.embed", "llm.get_available_models", "maisaka.proactive.trigger"],
   "i18n": {"default_locale": "zh-CN", "locales_path": "_locales", "supported_locales": ["zh-CN"]}
 }

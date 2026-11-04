@@ -106,6 +106,41 @@ class HubClient:
             retry = 0
         raise HubError(response.status, f"LONG Hub HTTP {response.status}", retry)
 
+    async def healthcheck(self):
+        """Check the public image-list API without downloading image bytes."""
+        async with self.session.get(
+            self.settings.api_base + "/image",
+            params={"limit": 1, "offset": 0},
+            headers={**self.auth, "Accept-Encoding": "identity"},
+            timeout=aiohttp.ClientTimeout(total=30),
+            allow_redirects=False,
+        ) as response:
+            await self._check(response)
+            if response.status != 200:
+                raise HubError(response.status, "LONG Hub 图片列表响应状态无效")
+            if response.content_type != "application/json":
+                raise ValueError("LONG Hub 图片列表 Content-Type 无效")
+            raw = bytearray()
+            async for chunk in response.content.iter_chunked(8192):
+                raw.extend(chunk)
+                if len(raw) > 256 * 1024:
+                    raise ValueError("LONG Hub 图片列表响应过大")
+            envelope = json.loads(raw)
+            if (
+                not isinstance(envelope, dict)
+                or envelope.get("error") is not None
+                or not isinstance(envelope.get("data"), dict)
+            ):
+                raise ValueError("LONG Hub 图片列表响应格式错误")
+            data = envelope["data"]
+            if (
+                type(data.get("total")) is not int
+                or data["total"] < 0
+                or not isinstance(data.get("images"), list)
+                or any(not isinstance(item, dict) for item in data["images"])
+            ):
+                raise ValueError("LONG Hub 图片列表数据格式错误")
+
     async def catalog_version(self) -> str | None:
         async with self.session.get(
             self.settings.api_base + "/sync/version",

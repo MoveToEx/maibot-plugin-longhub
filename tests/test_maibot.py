@@ -94,6 +94,8 @@ class Host:
             }
         if capability == "maisaka.proactive.trigger":
             return {"success": not self.failure, "task_id": "native-task"}
+        if capability == "send.text":
+            return self.send_mode != "failed"
         if capability == "send.hybrid":
             assert args["sync_to_maisaka_history"] is True
             assert args["maisaka_source_kind"] == "guided_reply"
@@ -148,6 +150,7 @@ def test_real_sdk_registration_and_required_parameters():
         "send_longhub_meme",
         "meme",
         "longhub_context",
+        "longhub_health",
         "planner_policy",
         "planner_completion_guard",
         "replyer_context",
