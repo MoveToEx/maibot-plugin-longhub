@@ -30,15 +30,19 @@ async def test_command_probes_apis_and_sends_one_plain_report(mai, health_client
     async with plugin.lifecycle_lock:
         result = await asyncio.wait_for(plugin.health(stream_id="chat-a"), 2)
     assert result == (True, None, True)
-    assert [name for name, _ in host.calls] == ["llm.generate", "send.text"]
+    assert [name for name, _ in host.calls] == ["llm.generate", "llm.embed", "send.text"]
     generate = host.calls[0][1]
     assert generate["task_name"] == "replyer" and generate["max_tokens"] == 64
     assert [message["role"] for message in generate["prompt"]] == ["system", "user"]
     assert all(isinstance(message["content"], str) for message in generate["prompt"])
-    sent = host.calls[1][1]
+    embedding = host.calls[1][1]
+    assert embedding["task_name"] == "embedding"
+    assert isinstance(embedding["text"], str) and embedding["text"]
+    assert embedding["texts"] is None
+    sent = host.calls[2][1]
     assert sent["stream_id"] == "chat-a" and sent["sync_to_maisaka_history"] is False
     assert re.fullmatch(
-        r"Bot：在线\nLLM API：可用，\d+ ms\nLONG Hub API：可用，\d+ ms", sent["text"]
+        r"LLM API：\d+ ms\nEmbedding API：\d+ ms\nLONG Hub API：\d+ ms", sent["text"]
     )
     assert "tags" not in sent["text"]  # The diagnostic completion is discarded.
     health_client.open.assert_awaited_once()
@@ -59,24 +63,31 @@ def test_health_command_registration_and_exact_match():
     assert "send.text" in manifest["capabilities"]
 
 
-async def test_llm_and_hub_probes_run_concurrently(mai):
+async def test_all_api_probes_run_concurrently(mai):
     plugin, _ = mai
-    llm_started, hub_started = asyncio.Event(), asyncio.Event()
+    started = {name: asyncio.Event() for name in ("llm", "embedding", "hub")}
+
+    async def rendezvous(name):
+        started[name].set()
+        await asyncio.gather(*(event.wait() for event in started.values()))
 
     async def llm(**kwargs):
-        llm_started.set()
-        await hub_started.wait()
+        await rendezvous("llm")
         return {"success": True, "response": "OK"}
 
+    async def embedding(**kwargs):
+        await rendezvous("embedding")
+        return {"success": True, "embedding": [1.0, 2.0]}
+
     async def hub():
-        hub_started.set()
-        await llm_started.wait()
+        await rendezvous("hub")
 
     plugin.ctx.llm.generate = llm
+    plugin.ctx.llm.embed = embedding
     report = await asyncio.wait_for(
         HEALTH.health_report(plugin.ctx, SimpleNamespace(healthcheck=hub)), 2
     )
-    assert "LLM API：可用" in report and "LONG Hub API：可用" in report
+    assert re.fullmatch(r"LLM API：\d+ ms\nEmbedding API：\d+ ms\nLONG Hub API：\d+ ms", report)
 
 
 @pytest.mark.parametrize(
@@ -92,8 +103,37 @@ async def test_failed_or_empty_completion_is_unavailable_but_hub_still_checked(m
     plugin.ctx.llm.generate = AsyncMock(return_value=response)
     client = SimpleNamespace(healthcheck=AsyncMock())
     report = await HEALTH.health_report(plugin.ctx, client)
-    assert "Bot：在线" in report and "LLM API：不可用" in report and "LONG Hub API：可用" in report
+    assert report.startswith("LLM API：不可用")
+    assert re.search(r"\nEmbedding API：\d+ ms\nLONG Hub API：\d+ ms$", report)
     assert "provider-secret" not in report
+    client.healthcheck.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "response,detail",
+    [
+        (None, "嵌入调用失败，请检查宿主模型日志"),
+        ({"success": False, "error": "provider-secret"}, "嵌入调用失败，请检查宿主模型日志"),
+        ({"success": True, "embedding": []}, "嵌入未返回有效向量"),
+        ({"success": True, "embedding": None}, "嵌入未返回有效向量"),
+        ({"success": True, "embedding": "provider-secret"}, "嵌入未返回有效向量"),
+        ({"success": True, "embedding": ["provider-secret"]}, "嵌入未返回有效向量"),
+        ({"success": True, "embedding": [True]}, "嵌入未返回有效向量"),
+        ({"success": True, "embedding": [float("nan")]}, "嵌入未返回有效向量"),
+        ({"success": True, "embedding": [float("inf")]}, "嵌入未返回有效向量"),
+    ],
+)
+async def test_failed_or_invalid_embedding_keeps_other_results(mai, response, detail, caplog):
+    plugin, _ = mai
+    plugin.ctx.llm.embed = AsyncMock(return_value=response)
+    client = SimpleNamespace(healthcheck=AsyncMock())
+    with caplog.at_level(logging.WARNING):
+        report = await HEALTH.health_report(plugin.ctx, client)
+    assert re.fullmatch(
+        rf"LLM API：\d+ ms\nEmbedding API：不可用（{detail}），\d+ ms\nLONG Hub API：\d+ ms",
+        report,
+    )
+    assert "provider-secret" not in report + caplog.text
     client.healthcheck.assert_awaited_once()
 
 
@@ -104,21 +144,26 @@ async def test_hub_http_failure_keeps_llm_status_and_never_echoes_body(mai, capl
     )
     with caplog.at_level(logging.INFO):
         report = await HEALTH.health_report(plugin.ctx, client)
-    assert "LLM API：可用" in report and "LONG Hub API：不可用（HTTP 503）" in report
+    assert re.match(r"LLM API：\d+ ms\nEmbedding API：\d+ ms\n", report)
+    assert "LONG Hub API：不可用（HTTP 503）" in report
     assert "hub-secret" not in report + caplog.text and "response body" not in caplog.text
     assert "latency_ms=" in caplog.text
 
 
-async def test_unexpected_provider_error_is_not_echoed_or_logged(mai, caplog):
+@pytest.mark.parametrize("method,name", [("generate", "LLM API"), ("embed", "Embedding API")])
+async def test_unexpected_provider_error_is_not_echoed_or_logged(mai, caplog, method, name):
     plugin, _ = mai
-    plugin.ctx.llm.generate = AsyncMock(side_effect=RuntimeError("Authorization: provider-secret"))
+    setattr(
+        plugin.ctx.llm, method, AsyncMock(side_effect=RuntimeError("Authorization: provider-secret"))
+    )
     with caplog.at_level(logging.WARNING):
         report = await HEALTH.health_report(plugin.ctx, SimpleNamespace(healthcheck=AsyncMock()))
-    assert "LLM API：不可用（调用失败：RuntimeError）" in report
+    assert f"{name}：不可用（调用失败：RuntimeError）" in report
     assert "provider-secret" not in report + caplog.text and "Authorization" not in caplog.text
 
 
-async def test_timeout_still_returns_other_probe_result(mai, monkeypatch):
+@pytest.mark.parametrize("method,name", [("generate", "LLM API"), ("embed", "Embedding API")])
+async def test_timeout_still_returns_other_probe_result(mai, monkeypatch, method, name):
     plugin, _ = mai
     cancelled = asyncio.Event()
 
@@ -128,12 +173,15 @@ async def test_timeout_still_returns_other_probe_result(mai, monkeypatch):
         finally:
             cancelled.set()
 
-    plugin.ctx.llm.generate = pending
+    setattr(plugin.ctx.llm, method, pending)
     monkeypatch.setattr(HEALTH, "PROBE_TIMEOUT_SECONDS", 0.01)
     report = await asyncio.wait_for(
         HEALTH.health_report(plugin.ctx, SimpleNamespace(healthcheck=AsyncMock())), 1
     )
-    assert "LLM API：不可用（请求超时）" in report and "LONG Hub API：可用" in report
+    assert f"{name}：不可用（请求超时）" in report
+    assert re.search(r"\nLONG Hub API：\d+ ms$", report)
+    other_name = "Embedding API" if name == "LLM API" else "LLM API"
+    assert re.search(rf"(?:^|\n){other_name}：\d+ ms\n", report)
     assert cancelled.is_set()
 
 

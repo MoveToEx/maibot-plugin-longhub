@@ -506,7 +506,7 @@ class LongHubPlugin(MaiBotPlugin):
 
     @Command(
         "longhub_health",
-        description="检测机器人、LLM 和 LONG Hub API 是否在线，并报告 API 调用延迟",
+        description="检测 LLM、Embedding 和 LONG Hub API 是否可用，并报告调用延迟",
         pattern=r"^/health\s*$",
         intercept_message_level=2,
         timeout_ms=45000,

@@ -6,6 +6,8 @@ import asyncio
 import time
 
 from ..backend.client import HubError
+from ..backend.errors import SemanticError
+from .models import _vector
 
 PROBE_TIMEOUT_SECONDS = 30
 
@@ -32,6 +34,18 @@ async def llm_probe(ctx):
     # Model output is diagnostic only and is never sent or added to chat history.
 
 
+async def embedding_probe(ctx):
+    result = await ctx.llm.embed(
+        text="LONG Hub health check", task_name="embedding", timeout_ms=30000
+    )
+    if not isinstance(result, dict) or result.get("success") is not True:
+        raise HealthError("嵌入调用失败，请检查宿主模型日志")
+    try:
+        _vector(result)
+    except SemanticError:
+        raise HealthError("嵌入未返回有效向量") from None
+
+
 async def timed_probe(name, operation, logger):
     started = time.perf_counter()
     detail = None
@@ -56,13 +70,14 @@ async def timed_probe(name, operation, logger):
         detail is None,
         elapsed_ms,
     )
-    state = "可用" if detail is None else f"不可用（{detail}）"
-    return f"{name}：{state}，{elapsed_ms:.0f} ms"
+    state = "" if detail is None else f"不可用（{detail}），"
+    return f"{name}：{state}{elapsed_ms:.0f} ms"
 
 
 async def health_report(ctx, client):
-    llm, hub = await asyncio.gather(
+    llm, embedding, hub = await asyncio.gather(
         timed_probe("LLM API", lambda: llm_probe(ctx), ctx.logger),
+        timed_probe("Embedding API", lambda: embedding_probe(ctx), ctx.logger),
         timed_probe("LONG Hub API", client.healthcheck, ctx.logger),
     )
-    return f"Bot：在线\n{llm}\n{hub}"
+    return f"{llm}\n{embedding}\n{hub}"
